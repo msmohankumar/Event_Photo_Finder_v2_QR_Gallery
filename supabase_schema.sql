@@ -1,18 +1,55 @@
-create table if not exists public.event_config (
-  id integer primary key default 1,
-  event_name text not null default 'Event Gallery',
-  provider text not null default 'drive',
-  folder_url text not null default '',
-  threshold numeric not null default 0.40,
-  enabled boolean not null default true
+
+CREATE TABLE IF NOT EXISTS public.event_config (
+
+    id INTEGER PRIMARY KEY DEFAULT 1,
+
+    event_name TEXT NOT NULL DEFAULT 'Event Gallery',
+
+    provider TEXT NOT NULL DEFAULT 'drive',
+
+    folder_url TEXT NOT NULL DEFAULT '',
+
+    threshold NUMERIC NOT NULL DEFAULT 0.40,
+
+    enabled BOOLEAN NOT NULL DEFAULT FALSE
 );
 
--- Insert initial row
-insert into public.event_config (id, event_name, provider, folder_url, threshold, enabled)
-values (1, 'Event Gallery', 'drive', '', 0.40, false)
-on conflict (id) do nothing;
 
--- For a prototype, allow the configured Supabase key to access this table.
--- Prefer a server-side service role key stored only in Streamlit secrets;
--- never expose it to guests or commit it to GitHub.
-alter table public.event_config enable row level security;
+INSERT INTO public.event_config (
+
+    id,
+
+    event_name,
+
+    provider,
+
+    folder_url,
+
+    threshold,
+
+    enabled
+
+)
+
+VALUES (
+
+    1,
+
+    'Event Gallery',
+
+    'drive',
+
+    '',
+
+    0.40,
+
+    FALSE
+
+)
+
+ON CONFLICT (id) DO NOTHING;
+
+
+ALTER TABLE public.event_config
+
+ENABLE ROW LEVEL SECURITY;
