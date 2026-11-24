@@ -16,43 +16,32 @@ DROPBOX_LIST_FOLDER_CONTINUE_URL = (
     "https://api.dropboxapi.com/2/files/list_folder/continue"
 )
 
-DROPBOX_METADATA_URL = (
-    "https://api.dropboxapi.com/2/sharing/get_shared_link_metadata"
-)
-
 DROPBOX_DOWNLOAD_URL = (
     "https://content.dropboxapi.com/2/sharing/get_shared_link_file"
 )
 
 
 # ============================================================
-# NORMALIZE CONFIGURATION / SHARED LINK
+# NORMALIZE INPUT
+# Accept URL or configuration dictionary
 # ============================================================
 
 def _normalize_link(link):
 
-    # Allow the entire configuration dictionary
     if isinstance(link, dict):
 
-        provider = link.get("provider", "dropbox")
+        link = link.get(
+            "folder_url",
+            ""
+        )
 
-        if provider != "dropbox":
-            raise RuntimeError(
-                f"Gallery provider is '{provider}', not Dropbox."
-            )
-
-        link = link.get("folder_url", "")
-
-    # Allow None
     if link is None:
         link = ""
 
-    # Validate type
     if not isinstance(link, str):
 
         raise RuntimeError(
-            "Invalid Dropbox shared link type: "
-            + str(type(link).__name__)
+            "Invalid Dropbox shared link."
         )
 
     link = link.strip()
@@ -61,40 +50,16 @@ def _normalize_link(link):
 
         raise RuntimeError(
             "Dropbox shared folder URL is empty. "
-            "Please save the Dropbox folder link in Organizer settings."
+            "Enter and save the folder link in Organizer settings."
+        )
+
+    if not link.startswith("https://"):
+
+        raise RuntimeError(
+            "The Dropbox link must begin with https://"
         )
 
     return link
-
-
-# ============================================================
-# DROPBOX HEADERS
-# ============================================================
-
-def _dropbox_headers(token):
-
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-
-
-# ============================================================
-# DROPBOX ERROR
-# ============================================================
-
-def _dropbox_error(response):
-
-    try:
-
-        return json.dumps(
-            response.json(),
-            indent=2
-        )
-
-    except Exception:
-
-        return response.text[:2000]
 
 
 # ============================================================
@@ -119,32 +84,38 @@ def _get_dropbox_token():
 
 
 # ============================================================
-# TEST SHARED LINK METADATA
+# DROPBOX HEADERS
 # ============================================================
 
-def test_dropbox_shared_link(link, token):
+def _dropbox_headers(token):
 
-    link = _normalize_link(link)
+    return {
 
-    payload = {
-        "url": link
+        "Authorization": f"Bearer {token}",
+
+        "Content-Type": "application/json"
+
     }
 
-    response = requests.post(
-        DROPBOX_METADATA_URL,
-        headers=_dropbox_headers(token),
-        json=payload,
-        timeout=30
-    )
 
-    if not response.ok:
+# ============================================================
+# FORMAT DROPBOX ERROR
+# ============================================================
 
-        raise RuntimeError(
-            "Dropbox metadata test failed:\n"
-            + _dropbox_error(response)
+def _dropbox_error(response):
+
+    try:
+
+        data = response.json()
+
+        return json.dumps(
+            data,
+            indent=2
         )
 
-    return response.json()
+    except Exception:
+
+        return response.text[:2000]
 
 
 # ============================================================
@@ -160,11 +131,17 @@ def _list_shared_folder(
     link = _normalize_link(link)
 
     payload = {
+
         "path": path,
+
         "recursive": False,
+
         "shared_link": {
+
             "url": link
+
         }
+
     }
 
     response = requests.post(
@@ -176,9 +153,43 @@ def _list_shared_folder(
 
     if not response.ok:
 
+        error_text = _dropbox_error(
+            response
+        )
+
+        if "shared_link_not_found" in error_text:
+
+            raise RuntimeError(
+                "Dropbox cannot find this shared link.\n\n"
+                "Check the following:\n"
+                "1. Copy the shared folder link again from Dropbox.\n"
+                "2. Confirm the link is still active.\n"
+                "3. Make sure the link opens in an incognito browser "
+                "without requiring your Dropbox login.\n"
+                "4. Check whether the folder is password protected.\n"
+                "5. Make sure the link is a folder link, not an image/file link.\n\n"
+                "Dropbox response:\n"
+                + error_text
+            )
+
+        if response.status_code == 401:
+
+            raise RuntimeError(
+                "Dropbox access token is invalid or expired.\n\n"
+                + error_text
+            )
+
+        if response.status_code == 403:
+
+            raise RuntimeError(
+                "Dropbox denied access to this folder.\n\n"
+                "Check Dropbox token permissions and shared folder access.\n\n"
+                + error_text
+            )
+
         raise RuntimeError(
-            "Dropbox folder listing failed:\n"
-            + _dropbox_error(response)
+            "Dropbox folder listing failed.\n\n"
+            + error_text
         )
 
     data = response.json()
@@ -188,8 +199,14 @@ def _list_shared_folder(
         []
     )
 
-    # Pagination
-    while data.get("has_more", False):
+    # --------------------------------------------------------
+    # PAGINATION
+    # --------------------------------------------------------
+
+    while data.get(
+        "has_more",
+        False
+    ):
 
         response = requests.post(
             DROPBOX_LIST_FOLDER_CONTINUE_URL,
@@ -203,21 +220,24 @@ def _list_shared_folder(
         if not response.ok:
 
             raise RuntimeError(
-                "Dropbox pagination failed:\n"
+                "Dropbox pagination failed:\n\n"
                 + _dropbox_error(response)
             )
 
         data = response.json()
 
         entries.extend(
-            data.get("entries", [])
+            data.get(
+                "entries",
+                []
+            )
         )
 
     return entries
 
 
 # ============================================================
-# RECURSIVELY COLLECT IMAGE FILES
+# RECURSIVELY FIND IMAGES
 # ============================================================
 
 def _collect_images(
@@ -238,7 +258,9 @@ def _collect_images(
 
     for entry in entries:
 
-        entry_type = entry.get(".tag")
+        entry_type = entry.get(
+            ".tag"
+        )
 
         name = entry.get(
             "name",
@@ -247,10 +269,16 @@ def _collect_images(
 
         path = entry.get(
             "path_lower",
-            entry.get("path_display", "")
+            entry.get(
+                "path_display",
+                ""
+            )
         )
 
-        # Files
+        # ----------------------------------------------------
+        # IMAGE FILES
+        # ----------------------------------------------------
+
         if entry_type == "file":
 
             if name.lower().endswith(
@@ -275,7 +303,10 @@ def _collect_images(
 
                 })
 
-        # Subfolders
+        # ----------------------------------------------------
+        # SUBFOLDERS
+        # ----------------------------------------------------
+
         elif entry_type == "folder":
 
             subfolder_images = _collect_images(
@@ -292,7 +323,7 @@ def _collect_images(
 
 
 # ============================================================
-# DOWNLOAD IMAGE
+# DOWNLOAD SHARED FILE
 # ============================================================
 
 def _download_shared_file(
@@ -328,7 +359,7 @@ def _download_shared_file(
     if not response.ok:
 
         raise RuntimeError(
-            "Dropbox image download failed:\n"
+            "Dropbox image download failed:\n\n"
             + _dropbox_error(response)
         )
 
@@ -336,25 +367,18 @@ def _download_shared_file(
 
 
 # ============================================================
-# TEST GALLERY
+# TEST GALLERY CONNECTION
 # ============================================================
 
 def test_gallery(folder_url):
 
-    # Accept either URL or config dictionary
     folder_url = _normalize_link(
         folder_url
     )
 
     token = _get_dropbox_token()
 
-    # Metadata test
-    metadata = test_dropbox_shared_link(
-        folder_url,
-        token
-    )
-
-    # Folder listing test
+    # Validate by directly listing the folder
     entries = _list_shared_folder(
         link=folder_url,
         path="",
@@ -362,8 +386,6 @@ def test_gallery(folder_url):
     )
 
     return {
-
-        "metadata": metadata,
 
         "entries": entries,
 
@@ -373,35 +395,44 @@ def test_gallery(folder_url):
 
 
 # ============================================================
-# LOAD GALLERY
+# LOAD GALLERY IMAGES
 # ============================================================
 
 @st.cache_data(ttl=1800)
 def get_gallery_images(folder_url):
 
-    # FIX: Accept either a URL or configuration dictionary
     folder_url = _normalize_link(
         folder_url
     )
 
     token = _get_dropbox_token()
 
-    # Validate Dropbox shared link
-    test_dropbox_shared_link(
-        folder_url,
-        token
+    # --------------------------------------------------------
+    # DIRECT FOLDER TEST
+    # --------------------------------------------------------
+
+    _list_shared_folder(
+        link=folder_url,
+        path="",
+        token=token
     )
 
-    # Find images recursively
+    # --------------------------------------------------------
+    # FIND ALL IMAGE FILES
+    # --------------------------------------------------------
+
     image_files = _collect_images(
         link=folder_url,
         token=token,
         folder_path=""
     )
 
+    # --------------------------------------------------------
+    # DOWNLOAD IMAGES
+    # --------------------------------------------------------
+
     downloaded_images = []
 
-    # Download images
     for image_file in image_files:
 
         try:
