@@ -112,7 +112,9 @@ def guest_ui():
 
                 with st.spinner("Searching event photos..."):
 
-                    gallery_images = get_gallery_images(cfg)
+                    gallery_images = get_gallery_images(
+                    cfg.get("folder_url", "")
+                    )
 
                     st.write(
                         f"Gallery loaded: {len(gallery_images)} photos"
