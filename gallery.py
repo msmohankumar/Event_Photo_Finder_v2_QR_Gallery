@@ -1,6 +1,5 @@
 
 import os
-import json
 import requests
 import streamlit as st
 
@@ -31,16 +30,21 @@ def _dropbox_error(response):
     return f"Dropbox API HTTP {response.status_code}: {details}"
 
 
+# =========================================================
+# DROPBOX LISTING
+# =========================================================
+
 def _dropbox_list_folder(link, relative_path, token):
 
-    url = "https://api.dropboxapi.com/2/files/list_folder"
+    url = (
+        "https://api.dropboxapi.com/2/sharing/"
+        "list_shared_link_files"
+    )
 
     payload = {
+        "url": link,
         "path": relative_path,
-        "shared_link": {
-            "url": link
-        },
-        "recursive": False
+        "limit": 1000
     }
 
     response = requests.post(
@@ -61,7 +65,8 @@ def _dropbox_list_folder(link, relative_path, token):
     while data.get("has_more"):
 
         continue_url = (
-            "https://api.dropboxapi.com/2/files/list_folder/continue"
+            "https://api.dropboxapi.com/2/sharing/"
+            "list_shared_link_files/continue"
         )
 
         page = requests.post(
@@ -81,6 +86,10 @@ def _dropbox_list_folder(link, relative_path, token):
     return entries
 
 
+# =========================================================
+# DROPBOX FILE DOWNLOAD
+# =========================================================
+
 def _dropbox_download_shared_file(link, relative_path, token):
 
     url = (
@@ -90,10 +99,13 @@ def _dropbox_download_shared_file(link, relative_path, token):
 
     headers = {
         "Authorization": f"Bearer {token}",
-        "Dropbox-API-Arg": json.dumps({
-            "url": link,
-            "path": relative_path
-        })
+        "Dropbox-API-Arg": (
+            '{"url":'
+            + __import__("json").dumps(link)
+            + ',"path":'
+            + __import__("json").dumps(relative_path)
+            + "}"
+        )
     }
 
     response = requests.post(
@@ -112,12 +124,15 @@ def _dropbox_download_shared_file(link, relative_path, token):
 # DROPBOX GALLERY
 # =========================================================
 
-@st.cache_data(ttl=1800, max_entries=5, show_spinner=False)
+@st.cache_data(
+    ttl=1800,
+    max_entries=5,
+    show_spinner=False
+)
 def _cached_dropbox_gallery(link, token):
 
     images = []
 
-    # Folder paths relative to the shared-link root
     folders_to_process = [""]
 
     while folders_to_process:
@@ -132,10 +147,14 @@ def _cached_dropbox_gallery(link, token):
 
         for entry in entries:
 
-            tag = entry.get(".tag")
+            entry_type = entry.get(".tag")
             name = entry.get("name", "")
 
-            if tag == "folder":
+            # ---------------------------------------------
+            # SUBFOLDERS
+            # ---------------------------------------------
+
+            if entry_type == "folder":
 
                 if current_folder:
 
@@ -151,9 +170,15 @@ def _cached_dropbox_gallery(link, token):
 
                 folders_to_process.append(child_path)
 
-            elif tag == "file":
+            # ---------------------------------------------
+            # FILES
+            # ---------------------------------------------
 
-                if not name.lower().endswith(IMAGE_EXTENSIONS):
+            elif entry_type == "file":
+
+                if not name.lower().endswith(
+                    IMAGE_EXTENSIONS
+                ):
                     continue
 
                 if current_folder:
@@ -193,7 +218,8 @@ def dropbox_images(link):
     if not token:
 
         raise RuntimeError(
-            "DROPBOX_ACCESS_TOKEN is missing from Streamlit Secrets."
+            "DROPBOX_ACCESS_TOKEN is missing "
+            "from Streamlit Secrets."
         )
 
     return _cached_dropbox_gallery(
@@ -231,7 +257,9 @@ def _drive_folder_id(link):
     if match:
         return match.group(1)
 
-    raise ValueError("Could not extract Google Drive folder ID.")
+    raise ValueError(
+        "Could not extract Google Drive folder ID."
+    )
 
 
 def drive_images(link):
@@ -350,11 +378,13 @@ def azure_images(container_name):
 
     from azure.storage.blob import BlobServiceClient
 
-    service = BlobServiceClient.from_connection_string(connection)
+    service = BlobServiceClient.from_connection_string(
+        connection
+    )
 
-    container = container_name.strip()
-
-    client = service.get_container_client(container)
+    client = service.get_container_client(
+        container_name.strip()
+    )
 
     items = []
 
