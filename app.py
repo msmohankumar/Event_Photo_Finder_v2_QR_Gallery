@@ -1,15 +1,12 @@
-
 import os
 import io
 import zipfile
-
 import streamlit as st
 
 from config_store import load_config, save_config
 from gallery import get_gallery_images
 from matcher import find_matches
 from utils import make_guest_url, make_qr
-
 
 st.set_page_config(
     page_title="Event Photo Finder",
@@ -19,8 +16,7 @@ st.set_page_config(
 
 cfg = load_config()
 
-params = st.query_params
-mode = params.get("mode", "guest")
+mode = st.query_params.get("mode", "guest")
 
 if mode not in ("guest", "admin"):
     mode = "guest"
@@ -46,7 +42,9 @@ def guest_ui():
         )
         return
 
-    st.info(f"Gallery: {cfg.get('event_name', 'Event Gallery')}")
+    st.info(
+        f"Gallery: {cfg.get('event_name', 'Event Gallery')}"
+    )
 
     st.warning(
         "Face matching can make mistakes. "
@@ -64,9 +62,11 @@ def guest_ui():
     selfie_bytes = (
         selfie_camera.getvalue()
         if selfie_camera
-        else selfie_upload.getvalue()
-        if selfie_upload
-        else None
+        else (
+            selfie_upload.getvalue()
+            if selfie_upload
+            else None
+        )
     )
 
     threshold = st.slider(
@@ -188,11 +188,11 @@ def admin_ui():
     st.caption(
         "Update the shared event gallery. "
         "The guest QR always points to the app, "
-        "so it does not change when the gallery source changes."
+        "not the storage location."
     )
 
     # ------------------------------------------------------
-    # ORGANIZER LOGIN
+    # LOGIN
     # ------------------------------------------------------
 
     if not st.session_state.get(
@@ -207,22 +207,20 @@ def admin_ui():
 
         if st.button("Unlock organizer panel"):
 
-            expected = os.getenv(
+            expected = st.secrets.get(
                 "ADMIN_PASSWORD",
-                ""
+                os.getenv("ADMIN_PASSWORD", "")
             )
 
             if expected and password == expected:
 
                 st.session_state.admin_authenticated = True
-
                 st.rerun()
 
             elif not expected:
 
                 st.error(
-                    "Set ADMIN_PASSWORD in Streamlit secrets "
-                    "before using the organizer panel."
+                    "Set ADMIN_PASSWORD in Streamlit Secrets."
                 )
 
             else:
@@ -232,36 +230,112 @@ def admin_ui():
         return
 
     # ------------------------------------------------------
-    # GALLERY CONFIGURATION
+    # EVENT NAME
     # ------------------------------------------------------
 
     st.text_input(
         "Event name",
-        value=cfg.get(
-            "event_name",
-            "Event Gallery"
-        ),
+        value=cfg.get("event_name", "Event Gallery"),
         key="event_name"
     )
 
-    provider = st.selectbox(
+    # ------------------------------------------------------
+    # PROVIDER
+    # ------------------------------------------------------
+
+    provider_options = {
+        "Local folder (app host)": "local",
+        "Google Drive": "drive",
+        "Dropbox": "dropbox",
+        "TeraBox (not yet supported)": "terabox",
+        "Microsoft Azure Blob Storage": "azure",
+        "Amazon S3": "s3"
+    }
+
+    current_provider = cfg.get("provider", "drive")
+
+    current_label = next(
+        (
+            label
+            for label, value in provider_options.items()
+            if value == current_provider
+        ),
+        "Google Drive"
+    )
+
+    provider_label = st.selectbox(
         "Gallery provider",
-        [
-            "Google Drive (public folder)",
-            "Dropbox (shared folder)"
-        ],
-        index=(
-            0
-            if cfg.get("provider", "drive") == "drive"
-            else 1
+        list(provider_options.keys()),
+        index=list(provider_options.keys()).index(
+            current_label
         )
     )
 
-    st.text_input(
-        "Gallery folder link",
+    provider = provider_options[provider_label]
+
+    # ------------------------------------------------------
+    # PROVIDER-SPECIFIC INPUT
+    # ------------------------------------------------------
+
+    input_labels = {
+        "local": "Folder path on the Streamlit server",
+        "drive": "Google Drive folder link",
+        "dropbox": "Dropbox shared folder link",
+        "terabox": "TeraBox shared link",
+        "azure": "Azure Blob container name",
+        "s3": "Amazon S3 bucket name"
+    }
+
+    folder_url = st.text_input(
+        input_labels[provider],
         value=cfg.get("folder_url", ""),
         key="folder_url"
     )
+
+    if provider == "local":
+
+        st.info(
+            "Local folder refers to the folder on the machine "
+            "running Streamlit. On Streamlit Cloud, this is the "
+            "cloud server, not your personal computer."
+        )
+
+    elif provider == "drive":
+
+        st.caption(
+            "Requires a Google Drive API key and accessible folder."
+        )
+
+    elif provider == "dropbox":
+
+        st.caption(
+            "Requires a Dropbox access token with appropriate API permissions."
+        )
+
+    elif provider == "azure":
+
+        st.caption(
+            "Enter the Azure Blob container name. "
+            "The connection string is configured in Streamlit Secrets."
+        )
+
+    elif provider == "s3":
+
+        st.caption(
+            "Enter the S3 bucket name. AWS credentials "
+            "and region are configured in Streamlit Secrets."
+        )
+
+    elif provider == "terabox":
+
+        st.warning(
+            "TeraBox is listed as a source, but photo retrieval "
+            "is not implemented in this version."
+        )
+
+    # ------------------------------------------------------
+    # SETTINGS
+    # ------------------------------------------------------
 
     st.slider(
         "Default matching sensitivity",
@@ -277,15 +351,8 @@ def admin_ui():
         value=bool(cfg.get("enabled", True))
     )
 
-    st.caption(
-        "Google Drive folders must be publicly viewable "
-        "and require a Google Drive API key. "
-        "Dropbox folders require a Dropbox access token "
-        "configured in Streamlit secrets."
-    )
-
     # ------------------------------------------------------
-    # SAVE CONFIGURATION
+    # SAVE
     # ------------------------------------------------------
 
     if st.button(
@@ -297,19 +364,13 @@ def admin_ui():
 
             "event_name": st.session_state.event_name,
 
-            "provider": (
-                "drive"
-                if provider.startswith("Google")
-                else "dropbox"
-            ),
+            "provider": provider,
 
             "folder_url": (
                 st.session_state.folder_url.strip()
             ),
 
-            "threshold": (
-                st.session_state.threshold
-            ),
+            "threshold": st.session_state.threshold,
 
             "enabled": enabled
         }
@@ -319,8 +380,7 @@ def admin_ui():
             save_config(new_cfg)
 
             st.success(
-                "Gallery configuration saved. "
-                "Guest page now uses the updated gallery."
+                "Gallery configuration saved successfully."
             )
 
             st.rerun()
@@ -328,20 +388,20 @@ def admin_ui():
         except Exception as exc:
 
             st.error(
-                f"Could not save shared configuration: {exc}"
+                f"Could not save configuration: {exc}"
             )
 
     # ------------------------------------------------------
     # QR CODE
     # ------------------------------------------------------
 
-    guest_url = make_guest_url()
+    st.subheader("📱 Guest QR code")
 
-    st.subheader("Guest QR code")
+    guest_url = make_guest_url()
 
     st.write(
         "Print this QR code for guests. "
-        "It stays the same when you update the gallery."
+        "It remains the same when you change the gallery."
     )
 
     qr_image = make_qr(guest_url)
@@ -361,28 +421,19 @@ def admin_ui():
     )
 
     # ------------------------------------------------------
-    # TEST GALLERY CONNECTION
+    # CONNECTION TEST
     # ------------------------------------------------------
 
-    st.subheader("Gallery connection test")
+    st.subheader("🔍 Gallery connection test")
 
-    if st.button("Test folder link"):
+    if st.button("Test gallery source"):
 
         try:
 
             test_cfg = {
-
                 **cfg,
-
-                "provider": (
-                    "drive"
-                    if provider.startswith("Google")
-                    else "dropbox"
-                ),
-
-                "folder_url": (
-                    st.session_state.folder_url
-                )
+                "provider": provider,
+                "folder_url": folder_url.strip()
             }
 
             images = get_gallery_images(test_cfg)
@@ -394,11 +445,13 @@ def admin_ui():
 
         except Exception as exc:
 
-            st.error(str(exc))
+            st.error(
+                f"Connection failed: {exc}"
+            )
 
 
 # ==========================================================
-# PAGE ROUTING
+# ROUTING
 # ==========================================================
 
 if mode == "admin":
