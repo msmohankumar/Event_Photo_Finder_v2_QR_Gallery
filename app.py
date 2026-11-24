@@ -5,14 +5,13 @@ import zipfile
 import streamlit as st
 
 from config_store import load_config, save_config
-from gallery import get_gallery_images
+from gallery import get_gallery_images, clear_dropbox_gallery_cache
 from matcher import find_matches
 from utils import make_guest_url, make_qr
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
+# =========================================================
+# PAGE CONFIGURATION
+# =========================================================
 
 st.set_page_config(
     page_title="Event Photo Finder",
@@ -20,27 +19,15 @@ st.set_page_config(
     layout="wide"
 )
 
+# =========================================================
+# LOAD CONFIGURATION
+# =========================================================
+
 cfg = load_config()
 
-
-# ============================================================
-# ADMIN PASSWORD
-# ============================================================
-
-def get_admin_password():
-
-    try:
-        return st.secrets.get(
-            "ADMIN_PASSWORD",
-            os.getenv("ADMIN_PASSWORD", "")
-        )
-    except Exception:
-        return os.getenv("ADMIN_PASSWORD", "")
-
-
-# ============================================================
-# GUEST PHOTO FINDER
-# ============================================================
+# =========================================================
+# GUEST INTERFACE
+# =========================================================
 
 def guest_ui():
 
@@ -48,156 +35,122 @@ def guest_ui():
 
     st.markdown(
         """
-        ### Welcome!
+        ### Find your photos from the event!
 
-        Take a selfie and we'll search the event gallery
-        to find photos in which you appear.
+        Take a selfie or upload your photo below.
+        We'll search the event gallery and show photos that may contain you.
         """
     )
 
-    # --------------------------------------------------------
-    # GALLERY CONFIGURATION CHECK
-    # --------------------------------------------------------
-
     if not cfg.get("enabled", False):
-
-        st.info(
-            "The event photo gallery is currently unavailable."
-        )
-
+        st.warning("The event photo gallery is currently unavailable.")
         return
 
-    if not cfg.get("folder_url", "").strip():
-
-        st.info(
-            "The event photo gallery has not been configured."
-        )
-
+    if not cfg.get("folder_url"):
+        st.warning("The event gallery has not been configured.")
         return
 
     st.markdown("---")
 
-    st.subheader(
-        cfg.get("event_name", "Event Gallery")
+    st.subheader(cfg.get("event_name", "Event Gallery"))
+
+    # -----------------------------------------------------
+    # SELFIE INPUT
+    # -----------------------------------------------------
+
+    st.markdown("### 1. Take your selfie")
+
+    camera_photo = st.camera_input(
+        "Take a selfie using your camera",
+        key="selfie_camera"
     )
 
-    st.caption(
-        "Take a selfie below. The app will search the saved event gallery "
-        "and show only photos matching your face."
-    )
-
-    # --------------------------------------------------------
-    # SELFIE
-    # --------------------------------------------------------
-
-    selfie_camera = st.camera_input(
-        "📷 Take your selfie",
-        key="guest_camera"
-    )
-
-    selfie_upload = st.file_uploader(
-        "Or upload your selfie",
+    uploaded_photo = st.file_uploader(
+        "Or upload a selfie from your phone",
         type=["jpg", "jpeg", "png"],
-        key="guest_upload"
+        key="selfie_upload"
     )
 
     selfie_bytes = None
 
-    if selfie_camera:
+    if camera_photo is not None:
+        selfie_bytes = camera_photo.getvalue()
 
-        selfie_bytes = selfie_camera.getvalue()
+    elif uploaded_photo is not None:
+        selfie_bytes = uploaded_photo.getvalue()
 
-    elif selfie_upload:
+    # -----------------------------------------------------
+    # SEARCH
+    # -----------------------------------------------------
 
-        selfie_bytes = selfie_upload.getvalue()
+    st.markdown("### 2. Find your photos")
 
-    # --------------------------------------------------------
-    # SEARCH BUTTON
-    # --------------------------------------------------------
-
-    threshold = float(cfg.get("threshold", 0.40))
-
-    st.caption(
-        "The search uses the event gallery configured by the organizer."
+    threshold = st.slider(
+        "Matching sensitivity",
+        min_value=0.20,
+        max_value=0.70,
+        value=float(cfg.get("threshold", 0.40)),
+        step=0.01,
+        help="Lower values are stricter. Higher values may find more photos but can include false matches."
     )
 
-    search_button = st.button(
-        "🔎 Find My Photos",
-        type="primary",
-        disabled=not selfie_bytes
-    )
+    if selfie_bytes:
 
-    # --------------------------------------------------------
-    # MATCH SEARCH
-    # --------------------------------------------------------
+        st.success("Selfie selected. You can now search for your photos.")
 
-    if search_button:
+        if st.button(
+            "🔎 Find My Photos",
+            type="primary",
+            use_container_width=True
+        ):
 
-        st.session_state.pop("photo_matches", None)
-        st.session_state.pop("photo_match_errors", None)
+            # Clear old search results when a new search starts
+            st.session_state.pop("guest_matches", None)
+            st.session_state.pop("guest_errors", None)
 
-        try:
+            try:
 
-            with st.spinner(
-                "Loading event photos and searching for your face..."
-            ):
+                with st.spinner("Searching event photos..."):
 
-                # Load saved gallery from Dropbox / configured provider.
-                gallery_images = get_gallery_images(cfg)
+                    gallery_images = get_gallery_images(cfg)
 
-                if not gallery_images:
-
-                    st.warning(
-                        "No event photos were found in the gallery."
+                    st.write(
+                        f"Gallery loaded: {len(gallery_images)} photos"
                     )
 
-                    return
+                    matches, errors = find_matches(
+                        selfie_bytes,
+                        gallery_images,
+                        threshold
+                    )
 
-                st.info(
-                    f"Searching {len(gallery_images)} event photos..."
-                )
+                    st.session_state["guest_matches"] = matches
+                    st.session_state["guest_errors"] = errors
 
-                # Search the selfie against the saved event gallery.
-                matches, errors = find_matches(
-                    selfie_bytes,
-                    gallery_images,
-                    threshold
-                )
+            except Exception as exc:
 
-                st.session_state["photo_matches"] = matches
-                st.session_state["photo_match_errors"] = errors
+                st.error(f"Search failed: {exc}")
 
-        except Exception as exc:
+    else:
 
-            st.error(
-                f"Unable to search the event gallery: {exc}"
-            )
+        st.info("Take a selfie or upload an image to start searching.")
 
-            return
+    # -----------------------------------------------------
+    # RESULTS
+    # -----------------------------------------------------
 
-    # --------------------------------------------------------
-    # DISPLAY MATCHES
-    # --------------------------------------------------------
+    if "guest_matches" in st.session_state:
 
-    matches = st.session_state.get(
-        "photo_matches",
-        None
-    )
+        matches = st.session_state["guest_matches"]
+        errors = st.session_state.get("guest_errors", [])
 
-    errors = st.session_state.get(
-        "photo_match_errors",
-        []
-    )
-
-    if matches is not None:
-
-        st.divider()
+        st.markdown("---")
 
         st.subheader(
-            f"🎉 {len(matches)} matching photo(s) found"
+            f"🎉 Found {len(matches)} matching photo(s)"
         )
 
-        if len(matches) == 0:
+        if not matches:
 
             st.info(
                 "No matching photos found. "
@@ -207,49 +160,28 @@ def guest_ui():
         else:
 
             st.markdown(
-                "Select **Download photo** under any picture "
-                "to save it individually."
+                "### Your photos"
             )
 
-            # ------------------------------------------------
-            # INDIVIDUAL PHOTO DISPLAY
-            # ------------------------------------------------
-
+            # Individual downloads
             for idx, match in enumerate(matches):
 
-                st.divider()
+                st.markdown("---")
 
-                col1, col2 = st.columns(
-                    [3, 1],
-                    vertical_alignment="center"
+                st.image(
+                    match["preview"],
+                    caption=match["name"],
+                    use_container_width=True
                 )
 
-                with col1:
-
-                    st.image(
-                        match["preview"],
-                        caption=match["name"],
-                        use_container_width=True
-                    )
-
-                with col2:
-
-                    st.markdown(
-                        f"**{match['name']}**"
-                    )
-
-                    st.caption(
-                        f"Match distance: {match['distance']:.4f}"
-                    )
-
-                    st.download_button(
-                        label="⬇️ Download photo",
-                        data=match["original"],
-                        file_name=match["name"],
-                        mime="application/octet-stream",
-                        key=f"individual_download_{idx}",
-                        use_container_width=True
-                    )
+                st.download_button(
+                    label=f"⬇️ Download {match['name']}",
+                    data=match["original"],
+                    file_name=match["name"],
+                    mime="image/jpeg",
+                    key=f"individual_download_{idx}",
+                    use_container_width=True
+                )
 
             # ------------------------------------------------
             # DOWNLOAD ALL
@@ -261,8 +193,8 @@ def guest_ui():
 
                 with zipfile.ZipFile(
                     zip_buffer,
-                    mode="w",
-                    compression=zipfile.ZIP_DEFLATED
+                    "w",
+                    zipfile.ZIP_DEFLATED
                 ) as zip_file:
 
                     for match in matches:
@@ -272,158 +204,124 @@ def guest_ui():
                             match["original"]
                         )
 
-                st.divider()
+                st.markdown("---")
 
                 st.download_button(
-                    label="📦 Download all matching photos",
+                    label="📦 Download all my photos",
                     data=zip_buffer.getvalue(),
-                    file_name="event_matching_photos.zip",
+                    file_name="my_event_photos.zip",
                     mime="application/zip",
-                    type="primary"
+                    use_container_width=True
                 )
 
-        # ----------------------------------------------------
+        # ------------------------------------------------
         # ERRORS
-        # ----------------------------------------------------
+        # ------------------------------------------------
 
         if errors:
 
-            with st.expander(
-                f"⚠️ {len(errors)} photos could not be processed"
-            ):
+            with st.expander("Photos skipped during processing"):
 
-                for error in errors:
+                st.write(errors)
 
-                    st.write(error)
-
-
-# ============================================================
-# ADMIN PANEL
-# ============================================================
+# =========================================================
+# ORGANIZER INTERFACE
+# =========================================================
 
 def admin_ui():
 
-    st.title("⚙️ Event Organizer Dashboard")
+    st.title("⚙️ Event Organizer")
 
-    if not st.session_state.get(
-        "admin_authenticated",
-        False
-    ):
+    # -----------------------------------------------------
+    # LOGIN
+    # -----------------------------------------------------
 
-        with st.form("admin_login_form"):
+    if not st.session_state.get("admin_authenticated", False):
 
-            password = st.text_input(
-                "Admin password",
-                type="password"
+        password = st.text_input(
+            "Organizer password",
+            type="password",
+            key="admin_password_input"
+        )
+
+        if st.button("🔐 Login"):
+
+            expected_password = st.secrets.get(
+                "ADMIN_PASSWORD",
+                os.getenv("ADMIN_PASSWORD", "")
             )
 
-            login = st.form_submit_button(
-                "🔓 Login"
-            )
+            if expected_password and password == expected_password:
 
-            if login:
+                st.session_state["admin_authenticated"] = True
+                st.rerun()
 
-                expected = get_admin_password()
+            elif not expected_password:
 
-                if not expected:
+                st.error(
+                    "ADMIN_PASSWORD is not configured in Streamlit Secrets."
+                )
 
-                    st.error(
-                        "ADMIN_PASSWORD is missing in Streamlit Secrets."
-                    )
+            else:
 
-                elif password == expected:
-
-                    st.session_state[
-                        "admin_authenticated"
-                    ] = True
-
-                    st.rerun()
-
-                else:
-
-                    st.error(
-                        "Incorrect password."
-                    )
+                st.error("Incorrect password.")
 
         return
 
-    # --------------------------------------------------------
-    # LOGOUT
-    # --------------------------------------------------------
-
-    if st.button("🔒 Logout"):
-
-        st.session_state[
-            "admin_authenticated"
-        ] = False
-
-        st.rerun()
-
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # CONFIGURATION
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
-    st.subheader("Event Gallery Settings")
+    st.subheader("Event Configuration")
 
     event_name = st.text_input(
         "Event name",
-        value=cfg.get(
-            "event_name",
-            "Event Gallery"
-        ),
+        value=cfg.get("event_name", "Event Gallery"),
         key="admin_event_name"
     )
 
     provider_options = {
-        "Local folder": "local",
         "Google Drive": "drive",
         "Dropbox": "dropbox",
+        "Local folder": "local",
         "TeraBox": "terabox",
         "Azure Blob Storage": "azure",
-        "Amazon S3": "s3",
+        "Amazon S3": "s3"
     }
 
-    providers = list(provider_options.values())
+    current_provider = cfg.get("provider", "dropbox")
 
-    current_provider = cfg.get(
-        "provider",
-        "dropbox"
-    )
+    provider_labels = list(provider_options.keys())
 
-    if current_provider not in providers:
-
-        current_provider = "dropbox"
-
-    current_index = providers.index(
-        current_provider
+    current_label = next(
+        (
+            label
+            for label, value in provider_options.items()
+            if value == current_provider
+        ),
+        "Dropbox"
     )
 
     provider_label = st.selectbox(
-        "Gallery storage",
-        list(provider_options.keys()),
-        index=current_index,
-        key="admin_provider"
+        "Gallery provider",
+        provider_labels,
+        index=provider_labels.index(current_label)
     )
 
-    provider = provider_options[
-        provider_label
-    ]
+    provider = provider_options[provider_label]
 
-    labels = {
-        "local": "Folder path",
+    folder_labels = {
         "drive": "Google Drive folder link",
         "dropbox": "Dropbox shared folder link",
+        "local": "Local folder path",
         "terabox": "TeraBox shared link",
-        "azure": "Azure container name",
-        "s3": "S3 bucket name",
+        "azure": "Azure container name or URL",
+        "s3": "S3 bucket name or URL"
     }
 
     folder_url = st.text_input(
-        labels[provider],
-        value=cfg.get(
-            "folder_url",
-            ""
-        ),
+        folder_labels[provider],
+        value=cfg.get("folder_url", ""),
         key="admin_folder_url"
     )
 
@@ -431,162 +329,148 @@ def admin_ui():
         "Default matching sensitivity",
         min_value=0.20,
         max_value=0.70,
-        value=float(
-            cfg.get(
-                "threshold",
-                0.40
-            )
-        ),
-        step=0.01
+        value=float(cfg.get("threshold", 0.40)),
+        step=0.01,
+        key="admin_threshold"
     )
 
     enabled = st.toggle(
-        "Enable gallery for guests",
-        value=bool(
-            cfg.get(
-                "enabled",
-                False
-            )
-        )
+        "Enable guest photo finder",
+        value=bool(cfg.get("enabled", True)),
+        key="admin_enabled"
     )
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # SAVE
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     if st.button(
-        "💾 Save Gallery Settings",
+        "💾 Save Gallery Configuration",
         type="primary"
     ):
 
-        new_cfg = {
-            "event_name": event_name.strip(),
+        new_config = {
+            "event_name": event_name,
             "provider": provider,
             "folder_url": folder_url.strip(),
             "threshold": threshold,
-            "enabled": enabled,
+            "enabled": enabled
         }
 
         try:
 
-            save_config(new_cfg)
+            save_config(new_config)
 
-            st.success(
-                "Gallery configuration saved successfully."
-            )
+            st.success("Configuration saved successfully.")
 
             st.rerun()
 
         except Exception as exc:
 
-            st.error(
-                f"Unable to save settings: {exc}"
-            )
+            st.error(f"Unable to save configuration: {exc}")
 
-    # --------------------------------------------------------
-    # TEST GALLERY
-    # --------------------------------------------------------
-
-    st.divider()
-
-    st.subheader("Test Gallery Connection")
-
-    if st.button("🔌 Test Gallery"):
-
-        test_cfg = {
-            **cfg,
-            "event_name": event_name,
-            "provider": provider,
-            "folder_url": folder_url.strip(),
-            "enabled": enabled,
-            "threshold": threshold
-        }
-
-        try:
-
-            with st.spinner(
-                "Connecting to gallery..."
-            ):
-
-                images = get_gallery_images(
-                    test_cfg
-                )
-
-            st.success(
-                f"Connected successfully. {len(images)} images found."
-            )
-
-        except Exception as exc:
-
-            st.error(
-                f"Gallery connection failed: {exc}"
-            )
-
-    # --------------------------------------------------------
+    # -----------------------------------------------------
     # QR CODE
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
-    st.divider()
+    st.markdown("---")
 
-    st.subheader("Guest QR Code")
+    st.subheader("📱 Guest QR Code")
 
     guest_url = make_guest_url()
 
-    qr_image = make_qr(
-        guest_url
+    qr_image = make_qr(guest_url)
+
+    st.image(qr_image, width=250)
+
+    st.caption(
+        "Guests should scan this QR code to open the selfie photo finder."
     )
 
-    st.image(
-        qr_image,
-        width=250
-    )
-
-    st.code(
-        guest_url
-    )
+    st.code(guest_url)
 
     st.download_button(
-        "⬇️ Download QR Code",
+        "⬇️ Download Guest QR Code",
         data=qr_image.getvalue(),
         file_name="event_guest_qr.png",
         mime="image/png"
     )
 
+    # -----------------------------------------------------
+    # DROPBOX CACHE REFRESH
+    # -----------------------------------------------------
 
-# ============================================================
-# APPLICATION ROUTING
-# ============================================================
+    if provider == "dropbox":
 
-st.title("📸 Event Photo Finder")
+        st.markdown("---")
 
-if st.session_state.get(
-    "admin_authenticated",
-    False
-):
+        st.subheader("Dropbox Gallery Cache")
+
+        st.caption(
+            "Gallery images are cached for 30 minutes."
+        )
+
+        if st.button("🔄 Refresh Dropbox Gallery Cache"):
+
+            clear_dropbox_gallery_cache()
+
+            st.success(
+                "Dropbox cache cleared. The gallery will reload on the next search."
+            )
+
+    # -----------------------------------------------------
+    # TEST GALLERY
+    # -----------------------------------------------------
+
+    st.markdown("---")
+
+    st.subheader("🧪 Test Gallery Connection")
+
+    if st.button("Test Gallery"):
+
+        try:
+
+            test_config = {
+                **cfg,
+                "provider": provider,
+                "folder_url": folder_url.strip()
+            }
+
+            with st.spinner("Connecting to gallery..."):
+
+                images = get_gallery_images(test_config)
+
+            st.success(
+                f"Connection successful. Found {len(images)} photos."
+            )
+
+        except Exception as exc:
+
+            st.error(f"Gallery test failed: {exc}")
+
+    # -----------------------------------------------------
+    # LOGOUT
+    # -----------------------------------------------------
+
+    st.markdown("---")
+
+    if st.button("🚪 Logout Organizer"):
+
+        st.session_state["admin_authenticated"] = False
+
+        st.rerun()
+
+# =========================================================
+# MAIN APPLICATION
+# GUEST PAGE IS ALWAYS THE DEFAULT
+# =========================================================
+
+guest_ui()
+
+# =========================================================
+# ORGANIZER LOGIN
+# =========================================================
+
+with st.expander("⚙️ Organizer Login"):
 
     admin_ui()
-
-else:
-
-    guest_ui()
-
-    # --------------------------------------------------------
-    # ADMIN LOGIN
-    # --------------------------------------------------------
-
-    st.divider()
-
-    with st.expander(
-        "🔐 Organizer Login"
-    ):
-
-        admin_ui()
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.caption(
-    "Event Photo Finder | Please use face matching with appropriate consent."
-)
