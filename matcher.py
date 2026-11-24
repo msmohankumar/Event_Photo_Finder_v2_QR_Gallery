@@ -1,4 +1,3 @@
-
 import numpy as np
 import streamlit as st
 
@@ -6,15 +5,15 @@ from deepface import DeepFace
 from utils import resized_rgb_array
 
 
-# ==========================================================
-# FACE EMBEDDINGS
-# ==========================================================
+# ============================================================
+# FACE EMBEDDING
+# ============================================================
 
 def _embeddings(image_bytes):
 
     arr = resized_rgb_array(
         image_bytes,
-        max_side=1000
+        max_side=1000,
     )
 
     results = DeepFace.represent(
@@ -22,38 +21,48 @@ def _embeddings(image_bytes):
         model_name="Facenet512",
         detector_backend="opencv",
         enforce_detection=True,
-        align=True
+        align=True,
     )
 
-    return [
-        np.asarray(
-            result["embedding"],
-            dtype=np.float32
-        )
-        for result in results
-        if "embedding" in result
-    ]
+    embeddings = []
+
+    for result in results:
+
+        if "embedding" in result:
+
+            embeddings.append(
+                np.asarray(
+                    result["embedding"],
+                    dtype=np.float32,
+                )
+            )
+
+    return embeddings
 
 
-# ==========================================================
-# CACHE GALLERY EMBEDDINGS
-# ==========================================================
+# ============================================================
+# CACHE GALLERY FACE EMBEDDINGS
+# ============================================================
 
 @st.cache_data(
     show_spinner=False,
-    max_entries=500
+    max_entries=500,
 )
 def _cached_gallery_embedding(image_bytes):
 
+    vectors = _embeddings(
+        image_bytes
+    )
+
     return [
         vector.tolist()
-        for vector in _embeddings(image_bytes)
+        for vector in vectors
     ]
 
 
-# ==========================================================
+# ============================================================
 # COSINE DISTANCE
-# ==========================================================
+# ============================================================
 
 def _cosine_distance(a, b):
 
@@ -63,7 +72,6 @@ def _cosine_distance(a, b):
     )
 
     if denominator == 0:
-
         return 1.0
 
     return float(
@@ -72,27 +80,34 @@ def _cosine_distance(a, b):
     )
 
 
-# ==========================================================
-# FIND MATCHES
-# ==========================================================
+# ============================================================
+# FACE MATCHING
+# ============================================================
 
 def find_matches(
     selfie_bytes,
     images,
-    threshold
+    threshold,
 ):
 
-    query_vectors = _embeddings(
+    if not images:
+
+        raise ValueError(
+            "The gallery contains no images to compare."
+        )
+
+    # Detect face in guest selfie
+    query_embeddings = _embeddings(
         selfie_bytes
     )
 
-    if not query_vectors:
+    if not query_embeddings:
 
         raise ValueError(
-            "No face was detected in the selfie."
+            "No face detected in the uploaded selfie."
         )
 
-    query = query_vectors[0]
+    query = query_embeddings[0]
 
     matches = []
     errors = []
@@ -106,57 +121,69 @@ def find_matches(
     for i, item in enumerate(images):
 
         status.write(
-            f"Checking {i + 1}/{total}: "
-            f'{item["name"]}'
+            f"Analysing photo {i + 1} of {total}: "
+            f"{item['name']}"
         )
 
         try:
 
-            vectors = [
-                np.asarray(
-                    vector,
-                    dtype=np.float32
+            if not item.get("original"):
+
+                raise ValueError(
+                    "Image data is empty."
                 )
-                for vector in _cached_gallery_embedding(
+
+            vectors = (
+                _cached_gallery_embedding(
                     item["original"]
                 )
-            ]
+            )
 
             if not vectors:
 
                 raise ValueError(
-                    "No face detected in this image."
+                    "No faces detected in this photo."
                 )
 
-            best_distance = min(
-                _cosine_distance(
-                    query,
-                    vector
+            vectors = [
+                np.asarray(
+                    vector,
+                    dtype=np.float32,
                 )
                 for vector in vectors
+            ]
+
+            # If multiple faces are detected in the event photo,
+            # compare against every detected face.
+            distances = [
+                _cosine_distance(
+                    query,
+                    vector,
+                )
+                for vector in vectors
+            ]
+
+            best_distance = min(
+                distances
             )
 
             if best_distance <= threshold:
 
                 matches.append({
-
                     "name": item["name"],
-
                     "original": item["original"],
-
                     "preview": item["preview"],
-
-                    "distance": best_distance
+                    "distance": best_distance,
                 })
 
         except Exception as exc:
 
             errors.append(
-                f'{item["name"]}: {exc}'
+                f"{item['name']}: {exc}"
             )
 
         progress.progress(
-            (i + 1) / max(1, total)
+            (i + 1) / total
         )
 
     progress.empty()
@@ -164,7 +191,7 @@ def find_matches(
     status.empty()
 
     matches.sort(
-        key=lambda match: match["distance"]
+        key=lambda item: item["distance"]
     )
 
     return matches, errors
