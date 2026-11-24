@@ -26,18 +26,30 @@ DROPBOX_DOWNLOAD_URL = (
 
 
 # ============================================================
-# NORMALIZE SHARED LINK
+# NORMALIZE CONFIGURATION / SHARED LINK
 # ============================================================
 
 def _normalize_link(link):
 
+    # Allow the entire configuration dictionary
     if isinstance(link, dict):
-        link = link.get("url", "")
 
+        provider = link.get("provider", "dropbox")
+
+        if provider != "dropbox":
+            raise RuntimeError(
+                f"Gallery provider is '{provider}', not Dropbox."
+            )
+
+        link = link.get("folder_url", "")
+
+    # Allow None
     if link is None:
         link = ""
 
+    # Validate type
     if not isinstance(link, str):
+
         raise RuntimeError(
             "Invalid Dropbox shared link type: "
             + str(type(link).__name__)
@@ -46,8 +58,10 @@ def _normalize_link(link):
     link = link.strip()
 
     if not link:
+
         raise RuntimeError(
-            "Dropbox shared folder URL is empty."
+            "Dropbox shared folder URL is empty. "
+            "Please save the Dropbox folder link in Organizer settings."
         )
 
     return link
@@ -72,12 +86,14 @@ def _dropbox_headers(token):
 def _dropbox_error(response):
 
     try:
+
         return json.dumps(
             response.json(),
             indent=2
         )
 
     except Exception:
+
         return response.text[:2000]
 
 
@@ -93,6 +109,7 @@ def _get_dropbox_token():
     )
 
     if not token:
+
         raise RuntimeError(
             "DROPBOX_ACCESS_TOKEN is missing "
             "from Streamlit Secrets."
@@ -171,10 +188,7 @@ def _list_shared_folder(
         []
     )
 
-    # --------------------------------------------------------
-    # PAGINATION
-    # --------------------------------------------------------
-
+    # Pagination
     while data.get("has_more", False):
 
         response = requests.post(
@@ -236,10 +250,7 @@ def _collect_images(
             entry.get("path_display", "")
         )
 
-        # ----------------------------------------------------
-        # FILE
-        # ----------------------------------------------------
-
+        # Files
         if entry_type == "file":
 
             if name.lower().endswith(
@@ -253,16 +264,18 @@ def _collect_images(
             ):
 
                 image_list.append({
+
                     "name": name,
+
                     "path": path,
+
                     "original": path,
+
                     "preview": path
+
                 })
 
-        # ----------------------------------------------------
-        # FOLDER
-        # ----------------------------------------------------
-
+        # Subfolders
         elif entry_type == "folder":
 
             subfolder_images = _collect_images(
@@ -293,11 +306,17 @@ def _download_shared_file(
     )
 
     headers = {
+
         "Authorization": f"Bearer {token}",
+
         "Dropbox-API-Arg": json.dumps({
+
             "url": shared_link,
+
             "path": file_path
+
         })
+
     }
 
     response = requests.post(
@@ -322,25 +341,20 @@ def _download_shared_file(
 
 def test_gallery(folder_url):
 
+    # Accept either URL or config dictionary
     folder_url = _normalize_link(
         folder_url
     )
 
     token = _get_dropbox_token()
 
-    # --------------------------------------------------------
-    # METADATA TEST
-    # --------------------------------------------------------
-
+    # Metadata test
     metadata = test_dropbox_shared_link(
         folder_url,
         token
     )
 
-    # --------------------------------------------------------
-    # FOLDER LIST TEST
-    # --------------------------------------------------------
-
+    # Folder listing test
     entries = _list_shared_folder(
         link=folder_url,
         path="",
@@ -348,9 +362,13 @@ def test_gallery(folder_url):
     )
 
     return {
+
         "metadata": metadata,
+
         "entries": entries,
+
         "entry_count": len(entries)
+
     }
 
 
@@ -361,37 +379,29 @@ def test_gallery(folder_url):
 @st.cache_data(ttl=1800)
 def get_gallery_images(folder_url):
 
+    # FIX: Accept either a URL or configuration dictionary
     folder_url = _normalize_link(
         folder_url
     )
 
     token = _get_dropbox_token()
 
-    # --------------------------------------------------------
-    # VALIDATE LINK
-    # --------------------------------------------------------
-
+    # Validate Dropbox shared link
     test_dropbox_shared_link(
         folder_url,
         token
     )
 
-    # --------------------------------------------------------
-    # FIND IMAGES
-    # --------------------------------------------------------
-
+    # Find images recursively
     image_files = _collect_images(
         link=folder_url,
         token=token,
         folder_path=""
     )
 
-    # --------------------------------------------------------
-    # DOWNLOAD IMAGES
-    # --------------------------------------------------------
-
     downloaded_images = []
 
+    # Download images
     for image_file in image_files:
 
         try:
@@ -403,10 +413,15 @@ def get_gallery_images(folder_url):
             )
 
             downloaded_images.append({
+
                 "name": image_file["name"],
-                "original": image_file["path"],
+
+                "original": image_bytes,
+
                 "preview": image_bytes,
+
                 "bytes": image_bytes
+
             })
 
         except Exception as exc:
