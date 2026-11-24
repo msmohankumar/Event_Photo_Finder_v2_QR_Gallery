@@ -1,5 +1,4 @@
 import os
-import io
 import requests
 import streamlit as st
 
@@ -16,11 +15,14 @@ SUPPORTED_IMAGE_EXTENSIONS = (
     ".png",
     ".webp",
     ".bmp",
+    ".gif",
 )
 
 
 def is_image_file(filename):
-    return str(filename).lower().endswith(SUPPORTED_IMAGE_EXTENSIONS)
+    return str(filename).lower().endswith(
+        SUPPORTED_IMAGE_EXTENSIONS
+    )
 
 
 def make_image_item(name, data):
@@ -32,73 +34,355 @@ def make_image_item(name, data):
 
 
 # ============================================================
+# DROPBOX HELPERS
+# ============================================================
+
+def _dropbox_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _dropbox_api_error(response, operation):
+
+    try:
+        details = response.json()
+    except Exception:
+        details = response.text
+
+    raise RuntimeError(
+        f"Dropbox {operation} failed "
+        f"({response.status_code}): {details}"
+    )
+
+
+def _dropbox_list_folder(token, shared_link, relative_path):
+
+    endpoint = "https://api.dropboxapi.com/2/files/list_folder"
+
+    payload = {
+        "path": relative_path,
+        "recursive": False,
+        "shared_link": {
+            "url": shared_link
+        },
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=_dropbox_headers(token),
+        json=payload,
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        _dropbox_api_error(response, "folder listing")
+
+    return response.json()
+
+
+def _dropbox_list_folder_continue(token, cursor):
+
+    endpoint = (
+        "https://api.dropboxapi.com/2/files/list_folder/continue"
+    )
+
+    response = requests.post(
+        endpoint,
+        headers=_dropbox_headers(token),
+        json={"cursor": cursor},
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        _dropbox_api_error(response, "pagination")
+
+    return response.json()
+
+
+def _dropbox_download_shared_file(
+    token,
+    shared_link,
+    relative_file_path,
+):
+
+    endpoint = (
+        "https://content.dropboxapi.com/2/sharing/"
+        "get_shared_link_file"
+    )
+
+    api_argument = {
+        "url": shared_link,
+        "path": relative_file_path,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Dropbox-API-Arg": (
+            __import__("json").dumps(api_argument)
+        ),
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=headers,
+        timeout=120,
+    )
+
+    if response.status_code != 200:
+        _dropbox_api_error(
+            response,
+            f"download of {relative_file_path}",
+        )
+
+    return response.content
+
+
+def _dropbox_join_path(parent, child):
+
+    child = str(child).strip("/")
+
+    if not parent:
+        return "/" + child
+
+    return parent.rstrip("/") + "/" + child
+
+
+# ============================================================
+# DROPBOX SHARED FOLDER
+# ============================================================
+
+def dropbox_images(link):
+
+    token = st.secrets.get(
+        "DROPBOX_ACCESS_TOKEN", ""
+    )
+
+    if not token:
+        raise RuntimeError(
+            "Dropbox access token is missing."
+        )
+
+    if not link:
+        raise ValueError(
+            "Dropbox shared folder link is empty."
+        )
+
+    images = []
+    folders_to_scan = [""]
+    visited = set()
+
+    # --------------------------------------------------------
+    # STEP 1: Recursively collect image paths
+    # --------------------------------------------------------
+
+    image_files = []
+
+    while folders_to_scan:
+
+        current_path = folders_to_scan.pop(0)
+
+        if current_path in visited:
+            continue
+
+        visited.add(current_path)
+
+        data = _dropbox_list_folder(
+            token,
+            link,
+            current_path,
+        )
+
+        while True:
+
+            for entry in data.get("entries", []):
+
+                entry_type = entry.get(".tag")
+                entry_name = entry.get("name", "")
+
+                # ------------------------------------------------
+                # FOLDER
+                # ------------------------------------------------
+
+                if entry_type == "folder":
+
+                    folder_path = _dropbox_join_path(
+                        current_path,
+                        entry_name,
+                    )
+
+                    folders_to_scan.append(
+                        folder_path
+                    )
+
+                # ------------------------------------------------
+                # FILE
+                # ------------------------------------------------
+
+                elif entry_type == "file":
+
+                    if is_image_file(entry_name):
+
+                        file_path = _dropbox_join_path(
+                            current_path,
+                            entry_name,
+                        )
+
+                        image_files.append({
+                            "name": entry_name,
+                            "path": file_path,
+                            "size": entry.get("size", 0),
+                        })
+
+            # ----------------------------------------------------
+            # PAGINATION
+            # ----------------------------------------------------
+
+            if not data.get("has_more"):
+                break
+
+            data = _dropbox_list_folder_continue(
+                token,
+                data["cursor"],
+            )
+
+    # --------------------------------------------------------
+    # STEP 2: Download images
+    # --------------------------------------------------------
+
+    if not image_files:
+        return []
+
+    progress = st.progress(0)
+
+    status = st.empty()
+
+    total = len(image_files)
+
+    for index, item in enumerate(image_files):
+
+        status.text(
+            f"Downloading Dropbox photos "
+            f"{index + 1}/{total}: {item['name']}"
+        )
+
+        data = _dropbox_download_shared_file(
+            token,
+            link,
+            item["path"],
+        )
+
+        images.append(
+            make_image_item(
+                item["name"],
+                data,
+            )
+        )
+
+        progress.progress(
+            (index + 1) / total
+        )
+
+    progress.empty()
+    status.empty()
+
+    return images
+
+
+# ============================================================
 # GOOGLE DRIVE
 # ============================================================
 
 def _drive_folder_id(link):
 
     if not link:
-        raise ValueError("Google Drive folder link is empty.")
+        raise ValueError(
+            "Google Drive folder link is empty."
+        )
 
     if "/folders/" in link:
-        return link.split("/folders/")[1].split("?")[0]
 
-    raise ValueError("Invalid Google Drive folder URL.")
+        return (
+            link.split("/folders/")[1]
+            .split("?")[0]
+            .split("/")[0]
+        )
+
+    raise ValueError(
+        "Invalid Google Drive folder URL."
+    )
 
 
 def drive_images(link):
 
-    api_key = st.secrets.get("GOOGLE_DRIVE_API_KEY", "")
+    api_key = st.secrets.get(
+        "GOOGLE_DRIVE_API_KEY", ""
+    )
 
     if not api_key:
-        raise RuntimeError("Google Drive API key is missing.")
+        raise RuntimeError(
+            "Google Drive API key is missing."
+        )
 
     folder_id = _drive_folder_id(link)
 
-    headers = {
-        "Accept": "application/json"
-    }
-
-    params = {
-        "q": f"'{folder_id}' in parents and trashed=false",
-        "key": api_key,
-        "fields": "files(id,name,mimeType)",
-        "pageSize": 1000,
-    }
-
-    endpoint = "https://www.googleapis.com/drive/v3/files"
-
-    response = requests.get(
-        endpoint,
-        headers=headers,
-        params=params,
-        timeout=60,
+    endpoint = (
+        "https://www.googleapis.com/drive/v3/files"
     )
 
-    response.raise_for_status()
-
-    files = response.json().get("files", [])
-
     images = []
+    page_token = None
 
-    for file in files:
+    while True:
 
-        if file.get("mimeType", "").startswith("image/"):
+        params = {
+            "q": (
+                f"'{folder_id}' in parents "
+                "and trashed=false"
+            ),
+            "key": api_key,
+            "fields": (
+                "nextPageToken,"
+                "files(id,name,mimeType)"
+            ),
+            "pageSize": 1000,
+        }
 
-            download_url = (
+        if page_token:
+            params["pageToken"] = page_token
+
+        response = requests.get(
+            endpoint,
+            params=params,
+            timeout=60,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        files = data.get("files", [])
+
+        for file in files:
+
+            if not file.get(
+                "mimeType", ""
+            ).startswith("image/"):
+                continue
+
+            download_endpoint = (
                 "https://www.googleapis.com/drive/v3/files/"
                 + file["id"]
             )
 
-            download_params = {
-                "alt": "media",
-                "key": api_key,
-            }
-
             download_response = requests.get(
-                download_url,
-                params=download_params,
-                timeout=60,
+                download_endpoint,
+                params={
+                    "alt": "media",
+                    "key": api_key,
+                },
+                timeout=120,
             )
 
             download_response.raise_for_status()
@@ -110,167 +394,12 @@ def drive_images(link):
                 )
             )
 
-    return images
-
-
-# ============================================================
-# DROPBOX
-# ============================================================
-
-def dropbox_images(link):
-
-    token = st.secrets.get("DROPBOX_ACCESS_TOKEN", "")
-
-    if not token:
-        raise RuntimeError("Dropbox access token is missing.")
-
-    if not link:
-        raise ValueError("Dropbox shared folder link is empty.")
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    list_endpoint = (
-        "https://api.dropboxapi.com/2/files/list_folder"
-    )
-
-    continue_endpoint = (
-        "https://api.dropboxapi.com/2/files/list_folder/continue"
-    )
-
-    download_endpoint = (
-        "https://content.dropboxapi.com/2/sharing/get_shared_link_file"
-    )
-
-    # Shared-link listing is non-recursive.
-    # We traverse subfolders manually using a queue.
-    folders_to_scan = [""]
-
-    visited_folders = set()
-    image_entries = []
-
-    while folders_to_scan:
-
-        current_path = folders_to_scan.pop(0)
-
-        if current_path in visited_folders:
-            continue
-
-        visited_folders.add(current_path)
-
-        payload = {
-            "path": current_path,
-            "recursive": False,
-            "shared_link": {
-                "url": link
-            },
-        }
-
-        response = requests.post(
-            list_endpoint,
-            headers=headers,
-            json=payload,
-            timeout=60,
+        page_token = data.get(
+            "nextPageToken"
         )
 
-        if response.status_code != 200:
-            raise RuntimeError(
-                "Dropbox folder listing failed "
-                f"({response.status_code}): {response.text}"
-            )
-
-        data = response.json()
-
-        while True:
-
-            entries = data.get("entries", [])
-
-            for entry in entries:
-
-                entry_type = entry.get(".tag")
-                entry_name = entry.get("name", "")
-
-                # Add subfolders to the traversal queue
-                if entry_type == "folder":
-
-                    folder_path = entry.get("path_lower")
-
-                    if folder_path:
-                        folders_to_scan.append(folder_path)
-
-                    continue
-
-                # Collect image files
-                if entry_type == "file" and is_image_file(entry_name):
-
-                    image_entries.append(entry)
-
-            if not data.get("has_more"):
-                break
-
-            continue_payload = {
-                "cursor": data["cursor"]
-            }
-
-            continue_response = requests.post(
-                continue_endpoint,
-                headers=headers,
-                json=continue_payload,
-                timeout=60,
-            )
-
-            if continue_response.status_code != 200:
-                raise RuntimeError(
-                    "Dropbox pagination failed "
-                    f"({continue_response.status_code}): "
-                    f"{continue_response.text}"
-                )
-
-            data = continue_response.json()
-
-    # --------------------------------------------------------
-    # Download image files from the shared link
-    # --------------------------------------------------------
-
-    images = []
-
-    for entry in image_entries:
-
-        file_name = entry.get("name", "image")
-
-        # Use the shared-link download endpoint
-        download_headers = {
-            "Authorization": f"Bearer {token}",
-            "Dropbox-API-Arg": (
-                '{"url":"' + link.replace('"', '\\"') + '",'
-                '"path":"' +
-                entry.get("path_lower", "").replace('"', '\\"') +
-                '"}'
-            ),
-        }
-
-        download_response = requests.post(
-            download_endpoint,
-            headers=download_headers,
-            timeout=120,
-        )
-
-        if download_response.status_code != 200:
-
-            raise RuntimeError(
-                f"Dropbox download failed for {file_name} "
-                f"({download_response.status_code}): "
-                f"{download_response.text}"
-            )
-
-        images.append(
-            make_image_item(
-                file_name,
-                download_response.content,
-            )
-        )
+        if not page_token:
+            break
 
     return images
 
@@ -282,7 +411,9 @@ def dropbox_images(link):
 def local_images(path):
 
     if not path:
-        raise ValueError("Local folder path is empty.")
+        raise ValueError(
+            "Local folder path is empty."
+        )
 
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -298,21 +429,32 @@ def local_images(path):
             if not is_image_file(filename):
                 continue
 
-            full_path = os.path.join(root, filename)
+            full_path = os.path.join(
+                root,
+                filename,
+            )
 
             try:
 
-                with open(full_path, "rb") as file:
+                with open(
+                    full_path,
+                    "rb",
+                ) as file:
+
                     data = file.read()
 
                 images.append(
-                    make_image_item(filename, data)
+                    make_image_item(
+                        filename,
+                        data,
+                    )
                 )
 
-            except Exception as e:
+            except Exception as error:
 
                 st.warning(
-                    f"Unable to read {filename}: {e}"
+                    f"Unable to read {filename}: "
+                    f"{error}"
                 )
 
     return images
@@ -339,9 +481,13 @@ def azure_images(container_name):
         )
 
     try:
-        from azure.storage.blob import BlobServiceClient
+
+        from azure.storage.blob import (
+            BlobServiceClient
+        )
 
     except ImportError:
+
         raise RuntimeError(
             "azure-storage-blob is not installed."
         )
@@ -365,7 +511,11 @@ def azure_images(container_name):
             blob.name
         )
 
-        data = blob_client.download_blob().readall()
+        data = (
+            blob_client
+            .download_blob()
+            .readall()
+        )
 
         images.append(
             make_image_item(
@@ -406,9 +556,11 @@ def s3_images(bucket):
         )
 
     try:
+
         import boto3
 
     except ImportError:
+
         raise RuntimeError(
             "boto3 is not installed."
         )
@@ -430,9 +582,13 @@ def s3_images(bucket):
         Bucket=bucket
     ):
 
-        for item in page.get("Contents", []):
+        for item in page.get(
+            "Contents", []
+        ):
 
-            key = item.get("Key", "")
+            key = item.get(
+                "Key", ""
+            )
 
             if not is_image_file(key):
                 continue
@@ -442,7 +598,9 @@ def s3_images(bucket):
                 Key=key,
             )
 
-            data = response["Body"].read()
+            data = (
+                response["Body"].read()
+            )
 
             images.append(
                 make_image_item(
@@ -461,8 +619,8 @@ def s3_images(bucket):
 def google_photos_images(link):
 
     raise NotImplementedError(
-        "Google Photos Picker API and OAuth integration "
-        "are not yet implemented."
+        "Google Photos Picker API integration "
+        "is not yet implemented."
     )
 
 
@@ -473,74 +631,46 @@ def google_photos_images(link):
 def terabox_images(link):
 
     raise NotImplementedError(
-        "TeraBox API integration is not yet implemented."
+        "TeraBox integration is not yet implemented."
     )
 
 
 # ============================================================
-# GALLERY ROUTER
+# PROVIDER ROUTER
 # ============================================================
 
 def get_gallery_images(cfg):
 
-    provider = cfg.get("provider", "").lower().strip()
+    provider = (
+        cfg.get("provider", "")
+        .lower()
+        .strip()
+    )
 
-    folder_url = cfg.get("folder_url", "").strip()
-
-    # --------------------------------------------------------
-    # Dropbox
-    # --------------------------------------------------------
+    folder_url = (
+        cfg.get("folder_url", "")
+        .strip()
+    )
 
     if provider == "dropbox":
-
         return dropbox_images(folder_url)
 
-    # --------------------------------------------------------
-    # Google Drive
-    # --------------------------------------------------------
-
     if provider == "drive":
-
         return drive_images(folder_url)
 
-    # --------------------------------------------------------
-    # Local folder
-    # --------------------------------------------------------
-
     if provider == "local":
-
         return local_images(folder_url)
 
-    # --------------------------------------------------------
-    # Azure
-    # --------------------------------------------------------
-
     if provider == "azure":
-
         return azure_images(folder_url)
 
-    # --------------------------------------------------------
-    # Amazon S3
-    # --------------------------------------------------------
-
     if provider == "s3":
-
         return s3_images(folder_url)
 
-    # --------------------------------------------------------
-    # Google Photos
-    # --------------------------------------------------------
-
     if provider == "google_photos":
-
         return google_photos_images(folder_url)
 
-    # --------------------------------------------------------
-    # TeraBox
-    # --------------------------------------------------------
-
     if provider == "terabox":
-
         return terabox_images(folder_url)
 
     raise ValueError(
