@@ -1,3 +1,4 @@
+
 import os
 import io
 import zipfile
@@ -47,8 +48,7 @@ def guest_ui():
     )
 
     st.warning(
-        "Face matching can make mistakes. "
-        "Use only with permission."
+        "Face matching can make mistakes. Use only with permission."
     )
 
     selfie_camera = st.camera_input("Take a selfie")
@@ -240,19 +240,30 @@ def admin_ui():
     )
 
     # ------------------------------------------------------
-    # PROVIDER
+    # PROVIDER OPTIONS
     # ------------------------------------------------------
 
     provider_options = {
+
         "Local folder (app host)": "local",
+
         "Google Drive": "drive",
+
+        "Google Photos (Picker API - pending integration)": "google_photos",
+
         "Dropbox": "dropbox",
+
         "TeraBox (not yet supported)": "terabox",
+
         "Microsoft Azure Blob Storage": "azure",
+
         "Amazon S3": "s3"
     }
 
-    current_provider = cfg.get("provider", "drive")
+    current_provider = cfg.get(
+        "provider",
+        "drive"
+    )
 
     current_label = next(
         (
@@ -274,15 +285,23 @@ def admin_ui():
     provider = provider_options[provider_label]
 
     # ------------------------------------------------------
-    # PROVIDER-SPECIFIC INPUT
+    # PROVIDER INPUT
     # ------------------------------------------------------
 
     input_labels = {
+
         "local": "Folder path on the Streamlit server",
+
         "drive": "Google Drive folder link",
+
+        "google_photos": "Google Photos selection/session information",
+
         "dropbox": "Dropbox shared folder link",
+
         "terabox": "TeraBox shared link",
+
         "azure": "Azure Blob container name",
+
         "s3": "Amazon S3 bucket name"
     }
 
@@ -292,24 +311,37 @@ def admin_ui():
         key="folder_url"
     )
 
+    # ------------------------------------------------------
+    # PROVIDER INFORMATION
+    # ------------------------------------------------------
+
     if provider == "local":
 
         st.info(
-            "Local folder refers to the folder on the machine "
-            "running Streamlit. On Streamlit Cloud, this is the "
-            "cloud server, not your personal computer."
+            "Local folder means a folder on the machine "
+            "running Streamlit. On Streamlit Cloud, this "
+            "is the cloud server, not your laptop."
         )
 
     elif provider == "drive":
 
         st.caption(
-            "Requires a Google Drive API key and accessible folder."
+            "Requires Google Drive API access and an accessible folder."
+        )
+
+    elif provider == "google_photos":
+
+        st.warning(
+            "Google Photos requires the Google Photos Picker API "
+            "and OAuth authorization. This code includes the provider "
+            "option, but the actual Picker integration is not yet "
+            "implemented. An album link alone is not sufficient."
         )
 
     elif provider == "dropbox":
 
         st.caption(
-            "Requires a Dropbox access token with appropriate API permissions."
+            "Requires a Dropbox access token with appropriate permissions."
         )
 
     elif provider == "azure":
@@ -329,12 +361,11 @@ def admin_ui():
     elif provider == "terabox":
 
         st.warning(
-            "TeraBox is listed as a source, but photo retrieval "
-            "is not implemented in this version."
+            "TeraBox photo retrieval is not implemented in this version."
         )
 
     # ------------------------------------------------------
-    # SETTINGS
+    # MATCHING SETTINGS
     # ------------------------------------------------------
 
     st.slider(
@@ -352,7 +383,7 @@ def admin_ui():
     )
 
     # ------------------------------------------------------
-    # SAVE
+    # SAVE CONFIGURATION
     # ------------------------------------------------------
 
     if st.button(
@@ -401,7 +432,7 @@ def admin_ui():
 
     st.write(
         "Print this QR code for guests. "
-        "It remains the same when you change the gallery."
+        "It remains the same when the gallery source changes."
     )
 
     qr_image = make_qr(guest_url)
@@ -431,8 +462,11 @@ def admin_ui():
         try:
 
             test_cfg = {
+
                 **cfg,
+
                 "provider": provider,
+
                 "folder_url": folder_url.strip()
             }
 
