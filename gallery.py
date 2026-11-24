@@ -1,678 +1,150 @@
-import os
-import requests
+import os, re, json, requests
 import streamlit as st
-
 from utils import image_bytes_preview
 
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
-# ============================================================
-# COMMON HELPERS
-# ============================================================
-
-SUPPORTED_IMAGE_EXTENSIONS = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".bmp",
-    ".gif",
-)
-
-
-def is_image_file(filename):
-    return str(filename).lower().endswith(
-        SUPPORTED_IMAGE_EXTENSIONS
-    )
-
-
-def make_image_item(name, data):
-    return {
-        "name": name,
-        "bytes": data,
-        "preview": image_bytes_preview(data),
-    }
-
-
-# ============================================================
-# DROPBOX HELPERS
-# ============================================================
-
-def _dropbox_headers(token):
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-
-def _dropbox_api_error(response, operation):
-
-    try:
-        details = response.json()
-    except Exception:
-        details = response.text
-
-    raise RuntimeError(
-        f"Dropbox {operation} failed "
-        f"({response.status_code}): {details}"
-    )
-
-
-def _dropbox_list_folder(token, shared_link, relative_path):
-
-    endpoint = "https://api.dropboxapi.com/2/files/list_folder"
-
-    payload = {
-        "path": relative_path,
-        "recursive": False,
-        "shared_link": {
-            "url": shared_link
-        },
-    }
-
-    response = requests.post(
-        endpoint,
-        headers=_dropbox_headers(token),
-        json=payload,
-        timeout=60,
-    )
-
-    if response.status_code != 200:
-        _dropbox_api_error(response, "folder listing")
-
-    return response.json()
-
-
-def _dropbox_list_folder_continue(token, cursor):
-
-    endpoint = (
-        "https://api.dropboxapi.com/2/files/list_folder/continue"
-    )
-
-    response = requests.post(
-        endpoint,
-        headers=_dropbox_headers(token),
-        json={"cursor": cursor},
-        timeout=60,
-    )
-
-    if response.status_code != 200:
-        _dropbox_api_error(response, "pagination")
-
-    return response.json()
-
-
-def _dropbox_download_shared_file(
-    token,
-    shared_link,
-    relative_file_path,
-):
-
-    endpoint = (
-        "https://content.dropboxapi.com/2/sharing/"
-        "get_shared_link_file"
-    )
-
-    api_argument = {
-        "url": shared_link,
-        "path": relative_file_path,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Dropbox-API-Arg": (
-            __import__("json").dumps(api_argument)
-        ),
-    }
-
-    response = requests.post(
-        endpoint,
-        headers=headers,
-        timeout=120,
-    )
-
-    if response.status_code != 200:
-        _dropbox_api_error(
-            response,
-            f"download of {relative_file_path}",
-        )
-
-    return response.content
-
-
-def _dropbox_join_path(parent, child):
-
-    child = str(child).strip("/")
-
-    if not parent:
-        return "/" + child
-
-    return parent.rstrip("/") + "/" + child
-
-
-# ============================================================
-# DROPBOX SHARED FOLDER
-# ============================================================
-
-def dropbox_images(link):
-
-    token = st.secrets.get(
-        "DROPBOX_ACCESS_TOKEN", ""
-    )
-
-    if not token:
-        raise RuntimeError(
-            "Dropbox access token is missing."
-        )
-
-    if not link:
-        raise ValueError(
-            "Dropbox shared folder link is empty."
-        )
-
-    images = []
-    folders_to_scan = [""]
-    visited = set()
-
-    # --------------------------------------------------------
-    # STEP 1: Recursively collect image paths
-    # --------------------------------------------------------
-
-    image_files = []
-
-    while folders_to_scan:
-
-        current_path = folders_to_scan.pop(0)
-
-        if current_path in visited:
-            continue
-
-        visited.add(current_path)
-
-        data = _dropbox_list_folder(
-            token,
-            link,
-            current_path,
-        )
-
-        while True:
-
-            for entry in data.get("entries", []):
-
-                entry_type = entry.get(".tag")
-                entry_name = entry.get("name", "")
-
-                # ------------------------------------------------
-                # FOLDER
-                # ------------------------------------------------
-
-                if entry_type == "folder":
-
-                    folder_path = _dropbox_join_path(
-                        current_path,
-                        entry_name,
-                    )
-
-                    folders_to_scan.append(
-                        folder_path
-                    )
-
-                # ------------------------------------------------
-                # FILE
-                # ------------------------------------------------
-
-                elif entry_type == "file":
-
-                    if is_image_file(entry_name):
-
-                        file_path = _dropbox_join_path(
-                            current_path,
-                            entry_name,
-                        )
-
-                        image_files.append({
-                            "name": entry_name,
-                            "path": file_path,
-                            "size": entry.get("size", 0),
-                        })
-
-            # ----------------------------------------------------
-            # PAGINATION
-            # ----------------------------------------------------
-
-            if not data.get("has_more"):
-                break
-
-            data = _dropbox_list_folder_continue(
-                token,
-                data["cursor"],
-            )
-
-    # --------------------------------------------------------
-    # STEP 2: Download images
-    # --------------------------------------------------------
-
-    if not image_files:
-        return []
-
-    progress = st.progress(0)
-
-    status = st.empty()
-
-    total = len(image_files)
-
-    for index, item in enumerate(image_files):
-
-        status.text(
-            f"Downloading Dropbox photos "
-            f"{index + 1}/{total}: {item['name']}"
-        )
-
-        data = _dropbox_download_shared_file(
-            token,
-            link,
-            item["path"],
-        )
-
-        images.append(
-            make_image_item(
-                item["name"],
-                data,
-            )
-        )
-
-        progress.progress(
-            (index + 1) / total
-        )
-
-    progress.empty()
-    status.empty()
-
-    return images
-
-
-# ============================================================
-# GOOGLE DRIVE
-# ============================================================
 
 def _drive_folder_id(link):
-
-    if not link:
-        raise ValueError(
-            "Google Drive folder link is empty."
-        )
-
-    if "/folders/" in link:
-
-        return (
-            link.split("/folders/")[1]
-            .split("?")[0]
-            .split("/")[0]
-        )
-
-    raise ValueError(
-        "Invalid Google Drive folder URL."
-    )
+    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", link)
+    if m: return m.group(1)
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", link)
+    if m: return m.group(1)
+    raise ValueError("Could not extract Google Drive folder ID from the link.")
 
 
 def drive_images(link):
-
-    api_key = st.secrets.get(
-        "GOOGLE_DRIVE_API_KEY", ""
-    )
-
-    if not api_key:
-        raise RuntimeError(
-            "Google Drive API key is missing."
-        )
-
+    key = st.secrets.get("GOOGLE_DRIVE_API_KEY", os.getenv("GOOGLE_DRIVE_API_KEY", ""))
+    if not key: raise RuntimeError("Configure GOOGLE_DRIVE_API_KEY in Streamlit secrets.")
     folder_id = _drive_folder_id(link)
+    params = {"q": f"'{folder_id}' in parents and trashed=false", "fields": "files(id,name,mimeType)", "pageSize": 1000, "key": key}
+    r = requests.get("https://www.googleapis.com/drive/v3/files", params=params, timeout=30); r.raise_for_status()
+    items=[]
+    for f in r.json().get("files", []):
+        if f.get("mimeType", "").startswith("image/"):
+            dl=requests.get(f"https://www.googleapis.com/drive/v3/files/{f['id']}?alt=media&key={key}",timeout=60); dl.raise_for_status()
+            b=dl.content; items.append({"name":f.get("name",f["id"]),"original":b,"preview":image_bytes_preview(b)})
+    return items
 
-    endpoint = (
-        "https://www.googleapis.com/drive/v3/files"
-    )
 
-    images = []
-    page_token = None
+@st.cache_data(ttl=1800, max_entries=5, show_spinner=False)
+def _cached_dropbox_gallery(link, token):
+    """Download/cache a Dropbox shared gallery for 30 minutes."""
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    endpoint = "https://api.dropboxapi.com/2/files/list_shared_link_files"
+    response = requests.post(endpoint, headers=headers, json={"url": link, "limit": 1000}, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    entries = list(data.get("entries", []))
+    cursor = data.get("cursor")
+    has_more = data.get("has_more", False)
 
-    while True:
+    # Dropbox may paginate large shared galleries.
+    while has_more and cursor:
+        page = requests.post(
+            "https://api.dropboxapi.com/2/files/list_shared_link_files/continue",
+            headers=headers, json={"cursor": cursor}, timeout=30
+        )
+        page.raise_for_status()
+        data = page.json()
+        entries.extend(data.get("entries", []))
+        cursor = data.get("cursor")
+        has_more = data.get("has_more", False)
 
-        params = {
-            "q": (
-                f"'{folder_id}' in parents "
-                "and trashed=false"
-            ),
-            "key": api_key,
-            "fields": (
-                "nextPageToken,"
-                "files(id,name,mimeType)"
-            ),
-            "pageSize": 1000,
+    items = []
+    for entry in entries:
+        name = entry.get("name", "")
+        if entry.get(".tag") != "file" or not name.lower().endswith(IMAGE_EXTENSIONS):
+            continue
+        path = entry.get("path_lower") or entry.get("path_display")
+        if not path:
+            continue
+        download_headers = {
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": json.dumps({"path": path}),
         }
-
-        if page_token:
-            params["pageToken"] = page_token
-
-        response = requests.get(
-            endpoint,
-            params=params,
-            timeout=60,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        files = data.get("files", [])
-
-        for file in files:
-
-            if not file.get(
-                "mimeType", ""
-            ).startswith("image/"):
-                continue
-
-            download_endpoint = (
-                "https://www.googleapis.com/drive/v3/files/"
-                + file["id"]
-            )
-
-            download_response = requests.get(
-                download_endpoint,
-                params={
-                    "alt": "media",
-                    "key": api_key,
-                },
-                timeout=120,
-            )
-
-            download_response.raise_for_status()
-
-            images.append(
-                make_image_item(
-                    file.get("name", "image"),
-                    download_response.content,
-                )
-            )
-
-        page_token = data.get(
-            "nextPageToken"
-        )
-
-        if not page_token:
-            break
-
-    return images
+        dl = requests.post("https://content.dropboxapi.com/2/files/download", headers=download_headers, timeout=60)
+        dl.raise_for_status()
+        image_bytes = dl.content
+        items.append({"name": name, "original": image_bytes, "preview": image_bytes_preview(image_bytes)})
+    return items
 
 
-# ============================================================
-# LOCAL FOLDER
-# ============================================================
+def dropbox_images(link):
+    token = st.secrets.get("DROPBOX_ACCESS_TOKEN", os.getenv("DROPBOX_ACCESS_TOKEN", ""))
+    if not token: raise RuntimeError("Configure DROPBOX_ACCESS_TOKEN in Streamlit secrets.")
+    return _cached_dropbox_gallery(link.strip(), token)
+
+
+def clear_dropbox_gallery_cache():
+    _cached_dropbox_gallery.clear()
+
 
 def local_images(path):
-
-    if not path:
-        raise ValueError(
-            "Local folder path is empty."
-        )
-
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Folder does not exist: {path}"
-        )
-
-    images = []
-
-    for root, _, filenames in os.walk(path):
-
-        for filename in filenames:
-
-            if not is_image_file(filename):
-                continue
-
-            full_path = os.path.join(
-                root,
-                filename,
-            )
-
+    if not os.path.isdir(path):
+        raise ValueError("The folder path must exist on the Streamlit server/host.")
+    items=[]
+    for name in sorted(os.listdir(path)):
+        if name.lower().endswith(IMAGE_EXTENSIONS):
+            full=os.path.join(path,name)
             try:
+                with open(full,"rb") as f: b=f.read()
+                items.append({"name":name,"original":b,"preview":image_bytes_preview(b)})
+            except Exception:
+                continue
+    return items
 
-                with open(
-                    full_path,
-                    "rb",
-                ) as file:
-
-                    data = file.read()
-
-                images.append(
-                    make_image_item(
-                        filename,
-                        data,
-                    )
-                )
-
-            except Exception as error:
-
-                st.warning(
-                    f"Unable to read {filename}: "
-                    f"{error}"
-                )
-
-    return images
-
-
-# ============================================================
-# AZURE BLOB STORAGE
-# ============================================================
 
 def azure_images(container_name):
+    conn=st.secrets.get("AZURE_STORAGE_CONNECTION_STRING",os.getenv("AZURE_STORAGE_CONNECTION_STRING",""))
+    if not conn: raise RuntimeError("Configure AZURE_STORAGE_CONNECTION_STRING in Streamlit secrets.")
+    from azure.storage.blob import BlobServiceClient
+    service=BlobServiceClient.from_connection_string(conn)
+    container=container_name.strip().replace("https://","").strip().strip("/")
+    if container.startswith("blob.core.windows.net/"):
+        container=container.split("/",1)[1]
+    container=container.split("/",1)[0]
+    client=service.get_container_client(container)
+    items=[]
+    for blob in client.list_blobs():
+        if blob.name.lower().endswith(IMAGE_EXTENSIONS):
+            b=client.download_blob(blob.name).readall()
+            items.append({"name":blob.name,"original":b,"preview":image_bytes_preview(b)})
+    return items
 
-    connection_string = st.secrets.get(
-        "AZURE_STORAGE_CONNECTION_STRING", ""
-    )
-
-    if not connection_string:
-        raise RuntimeError(
-            "Azure Storage connection string is missing."
-        )
-
-    if not container_name:
-        raise ValueError(
-            "Azure container name is missing."
-        )
-
-    try:
-
-        from azure.storage.blob import (
-            BlobServiceClient
-        )
-
-    except ImportError:
-
-        raise RuntimeError(
-            "azure-storage-blob is not installed."
-        )
-
-    service = BlobServiceClient.from_connection_string(
-        connection_string
-    )
-
-    container = service.get_container_client(
-        container_name
-    )
-
-    images = []
-
-    for blob in container.list_blobs():
-
-        if not is_image_file(blob.name):
-            continue
-
-        blob_client = container.get_blob_client(
-            blob.name
-        )
-
-        data = (
-            blob_client
-            .download_blob()
-            .readall()
-        )
-
-        images.append(
-            make_image_item(
-                blob.name,
-                data,
-            )
-        )
-
-    return images
-
-
-# ============================================================
-# AMAZON S3
-# ============================================================
 
 def s3_images(bucket):
+    access=st.secrets.get("AWS_ACCESS_KEY_ID",os.getenv("AWS_ACCESS_KEY_ID",""))
+    secret=st.secrets.get("AWS_SECRET_ACCESS_KEY",os.getenv("AWS_SECRET_ACCESS_KEY",""))
+    region=st.secrets.get("AWS_REGION",os.getenv("AWS_REGION",""))
+    if not access or not secret:
+        raise RuntimeError("Configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in Streamlit secrets.")
+    from boto3.session import Session
+    session=Session(aws_access_key_id=access,aws_secret_access_key=secret,region_name=region or None)
+    s3=session.client("s3")
+    items=[]
+    paginator=s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket.strip()):
+        for obj in page.get("Contents",[]):
+            name=obj["Key"]
+            if name.lower().endswith(IMAGE_EXTENSIONS):
+                b=s3.get_object(Bucket=bucket.strip(),Key=name)["Body"].read()
+                items.append({"name":name,"original":b,"preview":image_bytes_preview(b)})
+    return items
 
-    access_key = st.secrets.get(
-        "AWS_ACCESS_KEY_ID", ""
-    )
-
-    secret_key = st.secrets.get(
-        "AWS_SECRET_ACCESS_KEY", ""
-    )
-
-    region = st.secrets.get(
-        "AWS_REGION", "ap-south-1"
-    )
-
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "AWS credentials are missing."
-        )
-
-    if not bucket:
-        raise ValueError(
-            "S3 bucket name is missing."
-        )
-
-    try:
-
-        import boto3
-
-    except ImportError:
-
-        raise RuntimeError(
-            "boto3 is not installed."
-        )
-
-    client = boto3.client(
-        "s3",
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        region_name=region,
-    )
-
-    images = []
-
-    paginator = client.get_paginator(
-        "list_objects_v2"
-    )
-
-    for page in paginator.paginate(
-        Bucket=bucket
-    ):
-
-        for item in page.get(
-            "Contents", []
-        ):
-
-            key = item.get(
-                "Key", ""
-            )
-
-            if not is_image_file(key):
-                continue
-
-            response = client.get_object(
-                Bucket=bucket,
-                Key=key,
-            )
-
-            data = (
-                response["Body"].read()
-            )
-
-            images.append(
-                make_image_item(
-                    key,
-                    data,
-                )
-            )
-
-    return images
-
-
-# ============================================================
-# GOOGLE PHOTOS
-# ============================================================
-
-def google_photos_images(link):
-
-    raise NotImplementedError(
-        "Google Photos Picker API integration "
-        "is not yet implemented."
-    )
-
-
-# ============================================================
-# TERABOX
-# ============================================================
 
 def terabox_images(link):
+    raise RuntimeError("TeraBox shared-link access is not supported by this app yet. No login bypass or unofficial scraping is used.")
 
-    raise NotImplementedError(
-        "TeraBox integration is not yet implemented."
-    )
-
-
-# ============================================================
-# PROVIDER ROUTER
-# ============================================================
 
 def get_gallery_images(cfg):
-
-    provider = (
-        cfg.get("provider", "")
-        .lower()
-        .strip()
-    )
-
-    folder_url = (
-        cfg.get("folder_url", "")
-        .strip()
-    )
-
-    if provider == "dropbox":
-        return dropbox_images(folder_url)
-
-    if provider == "drive":
-        return drive_images(folder_url)
-
-    if provider == "local":
-        return local_images(folder_url)
-
-    if provider == "azure":
-        return azure_images(folder_url)
-
-    if provider == "s3":
-        return s3_images(folder_url)
-
-    if provider == "google_photos":
-        return google_photos_images(folder_url)
-
-    if provider == "terabox":
-        return terabox_images(folder_url)
-
-    raise ValueError(
-        f"Unsupported gallery provider: {provider}"
-    )
+    provider=cfg.get("provider")
+    link=cfg.get("folder_url","").strip()
+    if not link: raise ValueError("Organizer has not saved a gallery source.")
+    if provider=="drive": return drive_images(link)
+    if provider=="dropbox": return dropbox_images(link)
+    if provider=="local": return local_images(link)
+    if provider=="azure": return azure_images(link)
+    if provider=="s3": return s3_images(link)
+    if provider=="terabox": return terabox_images(link)
+    raise ValueError("Unsupported gallery provider.")
