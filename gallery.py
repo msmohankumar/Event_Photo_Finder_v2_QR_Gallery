@@ -2,11 +2,10 @@
 import requests
 import streamlit as st
 import json
-import time
 
 
 # ============================================================
-# DROPBOX API CONFIGURATION
+# DROPBOX API ENDPOINTS
 # ============================================================
 
 DROPBOX_LIST_FOLDER_URL = (
@@ -23,7 +22,7 @@ DROPBOX_DOWNLOAD_URL = (
 
 
 # ============================================================
-# HEADERS
+# DROPBOX HEADERS
 # ============================================================
 
 def _dropbox_headers(token):
@@ -41,46 +40,74 @@ def _dropbox_headers(token):
 def _dropbox_error(response):
 
     try:
-        error_data = response.json()
-        return json.dumps(error_data, indent=2)
+        return json.dumps(response.json(), indent=2)
 
     except Exception:
         return response.text[:2000]
 
 
 # ============================================================
-# DROPBOX API TEST
+# GET TOKEN
+# ============================================================
+
+def _get_dropbox_token():
+
+    token = st.secrets.get(
+        "DROPBOX_ACCESS_TOKEN",
+        ""
+    )
+
+    if not token:
+
+        raise RuntimeError(
+            "DROPBOX_ACCESS_TOKEN is missing "
+            "from Streamlit secrets."
+        )
+
+    return token
+
+
+# ============================================================
+# TEST SHARED LINK METADATA
 # ============================================================
 
 def test_dropbox_shared_link(link, token):
 
-    url = "https://api.dropboxapi.com/2/sharing/get_shared_link_metadata"
+    endpoint = (
+        "https://api.dropboxapi.com/2/sharing/"
+        "get_shared_link_metadata"
+    )
 
     payload = {
         "url": link
     }
 
     response = requests.post(
-        url,
+        endpoint,
         headers=_dropbox_headers(token),
         json=payload,
         timeout=30
     )
 
-    if response.ok:
-        return response.json()
+    if not response.ok:
 
-    raise RuntimeError(
-        "Dropbox metadata test failed:\n"
-        + _dropbox_error(response)
-    )
+        raise RuntimeError(
+            "Dropbox metadata test failed:\n"
+            + _dropbox_error(response)
+        )
+
+    return response.json()
 
 
 # ============================================================
-# LIST SHARED FOLDER CONTENTS
+# LIST SHARED FOLDER
 # ============================================================
 
-def _list_shared_folder(link, path="", token=None):
+def _list_shared_folder(
+    link,
+    path,
+    token
+):
 
     payload = {
         "path": path,
@@ -100,7 +127,7 @@ def _list_shared_folder(link, path="", token=None):
     if not response.ok:
 
         raise RuntimeError(
-            "Dropbox list_folder failed:\n"
+            "Dropbox folder listing failed:\n"
             + _dropbox_error(response)
         )
 
@@ -108,7 +135,9 @@ def _list_shared_folder(link, path="", token=None):
 
     entries = data.get("entries", [])
 
-    while data.get("has_more"):
+    # Pagination
+
+    while data.get("has_more", False):
 
         response = requests.post(
             DROPBOX_LIST_FOLDER_CONTINUE_URL,
@@ -136,38 +165,36 @@ def _list_shared_folder(link, path="", token=None):
 
 
 # ============================================================
-# RECURSIVE IMAGE DISCOVERY
+# RECURSIVE IMAGE COLLECTION
 # ============================================================
 
-def _get_all_images_from_folder(
-    shared_link,
+def _collect_images(
+    link,
     token,
     folder_path=""
 ):
 
-    images = []
+    image_list = []
 
     entries = _list_shared_folder(
-        link=shared_link,
+        link=link,
         path=folder_path,
         token=token
     )
 
     for entry in entries:
 
-        entry_type = entry.get(".tag")
-        entry_name = entry.get("name", "")
-        entry_path = entry.get("path_lower", "")
+        tag = entry.get(".tag")
+        name = entry.get("name", "")
+        path = entry.get("path_lower", "")
 
         # ----------------------------------------------------
-        # FILE
+        # IMAGE FILE
         # ----------------------------------------------------
 
-        if entry_type == "file":
+        if tag == "file":
 
-            extension = entry_name.lower()
-
-            if extension.endswith(
+            if name.lower().endswith(
                 (
                     ".jpg",
                     ".jpeg",
@@ -177,34 +204,34 @@ def _get_all_images_from_folder(
                 )
             ):
 
-                images.append({
-                    "name": entry_name,
-                    "path": entry_path,
-                    "original": entry_path,
-                    "preview": entry_path
+                image_list.append({
+                    "name": name,
+                    "path": path,
+                    "original": path,
+                    "preview": path
                 })
 
         # ----------------------------------------------------
         # SUBFOLDER
         # ----------------------------------------------------
 
-        elif entry_type == "folder":
+        elif tag == "folder":
 
-            subfolder_images = (
-                _get_all_images_from_folder(
-                    shared_link=shared_link,
-                    token=token,
-                    folder_path=entry_path
-                )
+            subfolder_images = _collect_images(
+                link=link,
+                token=token,
+                folder_path=path
             )
 
-            images.extend(subfolder_images)
+            image_list.extend(
+                subfolder_images
+            )
 
-    return images
+    return image_list
 
 
 # ============================================================
-# DOWNLOAD FILE FROM SHARED LINK
+# DOWNLOAD SHARED FILE
 # ============================================================
 
 def _download_shared_file(
@@ -230,7 +257,7 @@ def _download_shared_file(
     if not response.ok:
 
         raise RuntimeError(
-            "Dropbox file download failed:\n"
+            "Dropbox download failed:\n"
             + _dropbox_error(response)
         )
 
@@ -243,22 +270,16 @@ def _download_shared_file(
 
 def test_gallery(folder_url):
 
-    token = st.secrets.get(
-        "DROPBOX_ACCESS_TOKEN",
-        ""
-    )
+    token = _get_dropbox_token()
 
-    if not token:
-
-        raise RuntimeError(
-            "DROPBOX_ACCESS_TOKEN is missing "
-            "from Streamlit secrets."
-        )
+    # Test metadata
 
     metadata = test_dropbox_shared_link(
         folder_url,
         token
     )
+
+    # Test folder listing
 
     entries = _list_shared_folder(
         link=folder_url,
@@ -274,41 +295,32 @@ def test_gallery(folder_url):
 
 
 # ============================================================
-# CACHE GALLERY
+# LOAD GALLERY IMAGES
 # ============================================================
 
 @st.cache_data(ttl=1800)
 def get_gallery_images(folder_url):
 
-    token = st.secrets.get(
-        "DROPBOX_ACCESS_TOKEN",
-        ""
-    )
+    token = _get_dropbox_token()
 
-    if not token:
-
-        raise RuntimeError(
-            "DROPBOX_ACCESS_TOKEN is missing."
-        )
-
-    # Validate shared link first
+    # Verify link
 
     test_dropbox_shared_link(
         folder_url,
         token
     )
 
-    # Collect image paths recursively
+    # Find images
 
-    image_files = _get_all_images_from_folder(
-        shared_link=folder_url,
+    image_files = _collect_images(
+        link=folder_url,
         token=token,
         folder_path=""
     )
 
-    # Download images
-
     downloaded_images = []
+
+    # Download images
 
     for image in image_files:
 
@@ -330,18 +342,26 @@ def get_gallery_images(folder_url):
         except Exception as exc:
 
             print(
-                "Failed to download:",
-                image["name"],
-                str(exc)
+                f"Image download error: "
+                f"{image['name']}: {exc}"
             )
 
     return downloaded_images
 
 
 # ============================================================
-# CACHE REFRESH
+# CLEAR GALLERY CACHE
 # ============================================================
 
 def clear_gallery_cache():
 
     get_gallery_images.clear()
+
+
+# ============================================================
+# COMPATIBILITY FUNCTION FOR app.py
+# ============================================================
+
+def clear_dropbox_gallery_cache():
+
+    clear_gallery_cache()
