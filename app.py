@@ -15,7 +15,7 @@ from utils import make_guest_url, make_qr
 
 
 # ============================================================
-# PAGE
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -28,7 +28,7 @@ cfg = load_config()
 
 
 # ============================================================
-# GUEST PAGE
+# GUEST INTERFACE
 # ============================================================
 
 def guest_ui():
@@ -39,12 +39,15 @@ def guest_ui():
         """
         ### Find your photos from the event!
 
-        Take a selfie or upload a photo.
-        We'll compare your face with the event gallery.
+        Take a selfie or upload your photo.
+        We will search the event gallery for matching faces.
         """
     )
 
-    if not cfg.get("enabled", False):
+    if not cfg.get(
+        "enabled",
+        False,
+    ):
 
         st.warning(
             "The event photo finder is currently disabled."
@@ -52,7 +55,10 @@ def guest_ui():
 
         return
 
-    if not cfg.get("folder_url"):
+    if not cfg.get(
+        "folder_url",
+        "",
+    ):
 
         st.warning(
             "The gallery has not been configured."
@@ -73,7 +79,9 @@ def guest_ui():
     # SELFIE
     # --------------------------------------------------------
 
-    st.subheader("1. Take or upload your selfie")
+    st.subheader(
+        "1. Take or upload your selfie"
+    )
 
     camera = st.camera_input(
         "Take a selfie",
@@ -81,8 +89,12 @@ def guest_ui():
     )
 
     uploaded = st.file_uploader(
-        "Or upload your selfie",
-        type=["jpg", "jpeg", "png"],
+        "Or upload a selfie",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+        ],
         key="guest_upload",
     )
 
@@ -113,8 +125,8 @@ def guest_ui():
         step=0.01,
         help=(
             "Lower values are stricter. "
-            "Higher values may return more matches "
-            "but may also produce false matches."
+            "Higher values may produce more matches "
+            "but can include false matches."
         ),
     )
 
@@ -134,20 +146,21 @@ def guest_ui():
             use_container_width=True,
         ):
 
-            st.session_state.pop(
+            for key in [
                 "guest_matches",
-                None,
-            )
-
-            st.session_state.pop(
                 "guest_errors",
-                None,
-            )
+                "guest_total_images",
+            ]:
+
+                st.session_state.pop(
+                    key,
+                    None,
+                )
 
             try:
 
                 with st.spinner(
-                    "Loading event gallery..."
+                    "Loading gallery..."
                 ):
 
                     images = get_gallery_images(
@@ -157,15 +170,14 @@ def guest_ui():
                 if not images:
 
                     st.error(
-                        "The gallery returned zero images. "
-                        "Face recognition cannot proceed."
+                        "No gallery images were loaded."
                     )
 
                     return
 
-                st.info(
-                    f"Loaded {len(images)} gallery images. "
-                    "Starting face recognition..."
+                st.success(
+                    f"Loaded {len(images)} photos. "
+                    "Starting face recognition."
                 )
 
                 with st.spinner(
@@ -199,7 +211,7 @@ def guest_ui():
     else:
 
         st.info(
-            "Take a selfie or upload an image to search."
+            "Take a selfie or upload a photo to start."
         )
 
     # --------------------------------------------------------
@@ -226,7 +238,9 @@ def guest_ui():
 
     st.markdown("---")
 
-    st.subheader("Search Results")
+    st.subheader(
+        "Search Results"
+    )
 
     st.write(
         f"Gallery images analysed: {total_images}"
@@ -237,7 +251,7 @@ def guest_ui():
     )
 
     st.write(
-        f"Images skipped or failed: {len(errors)}"
+        f"Images skipped: {len(errors)}"
     )
 
     # --------------------------------------------------------
@@ -248,13 +262,13 @@ def guest_ui():
 
         st.warning(
             "No matching photos were found. "
-            "Try another selfie or adjust matching sensitivity."
+            "Try another selfie or adjust the sensitivity."
         )
 
     else:
 
         st.success(
-            f"Found {len(matches)} matching photo(s)!"
+            f"Found {len(matches)} matching photos!"
         )
 
         for index, match in enumerate(matches):
@@ -280,15 +294,15 @@ def guest_ui():
             )
 
         # ----------------------------------------------------
-        # ZIP
+        # ZIP DOWNLOAD
         # ----------------------------------------------------
 
         if len(matches) > 1:
 
-            buffer = io.BytesIO()
+            zip_buffer = io.BytesIO()
 
             with zipfile.ZipFile(
-                buffer,
+                zip_buffer,
                 "w",
                 zipfile.ZIP_DEFLATED,
             ) as archive:
@@ -302,34 +316,47 @@ def guest_ui():
 
             st.download_button(
                 label="📦 Download all matching photos",
-                data=buffer.getvalue(),
+                data=zip_buffer.getvalue(),
                 file_name="event_matching_photos.zip",
                 mime="application/zip",
                 use_container_width=True,
             )
 
     # --------------------------------------------------------
-    # ERRORS
+    # SKIPPED PHOTOS
     # --------------------------------------------------------
 
     if errors:
 
-        with st.expander(
-            "Details of images skipped"
-        ):
+        st.markdown(
+            "### Processing errors"
+        )
 
-            for error in errors:
+        # This is intentionally NOT an expander,
+        # so it cannot be nested in another expander.
 
-                st.write(error)
+        for error in errors[:20]:
+
+            st.warning(
+                error
+            )
+
+        if len(errors) > 20:
+
+            st.caption(
+                f"{len(errors) - 20} additional errors omitted."
+            )
 
 
 # ============================================================
-# ORGANIZER
+# ADMIN
 # ============================================================
 
 def admin_ui():
 
-    st.title("⚙️ Event Organizer")
+    st.title(
+        "⚙️ Event Organizer"
+    )
 
     # --------------------------------------------------------
     # LOGIN
@@ -345,7 +372,9 @@ def admin_ui():
             type="password",
         )
 
-        if st.button("🔐 Login"):
+        if st.button(
+            "🔐 Login",
+        ):
 
             expected = st.secrets.get(
                 "ADMIN_PASSWORD",
@@ -381,7 +410,9 @@ def admin_ui():
     # CONFIG
     # --------------------------------------------------------
 
-    st.subheader("Event Configuration")
+    st.subheader(
+        "Event Configuration"
+    )
 
     event_name = st.text_input(
         "Event name",
@@ -437,7 +468,7 @@ def admin_ui():
         "local": "Local folder path",
         "azure": "Azure container name",
         "s3": "S3 bucket name",
-        "terabox": "TeraBox link",
+        "terabox": "TeraBox shared link",
     }
 
     folder_url = st.text_input(
@@ -451,15 +482,15 @@ def admin_ui():
 
     threshold = st.slider(
         "Default matching sensitivity",
-        0.20,
-        0.70,
-        float(
+        min_value=0.20,
+        max_value=0.70,
+        value=float(
             cfg.get(
                 "threshold",
                 0.40,
             )
         ),
-        0.01,
+        step=0.01,
     )
 
     enabled = st.toggle(
@@ -496,7 +527,7 @@ def admin_ui():
             )
 
             st.success(
-                "Configuration saved."
+                "Configuration saved successfully."
             )
 
             st.rerun()
@@ -513,7 +544,9 @@ def admin_ui():
 
     st.markdown("---")
 
-    st.subheader("📱 Guest QR Code")
+    st.subheader(
+        "📱 Guest QR Code"
+    )
 
     guest_url = make_guest_url()
 
@@ -524,6 +557,11 @@ def admin_ui():
     st.image(
         qr,
         width=250,
+    )
+
+    st.caption(
+        "Guests can scan this QR code "
+        "to open the photo finder."
     )
 
     st.code(
@@ -545,7 +583,9 @@ def admin_ui():
 
         st.markdown("---")
 
-        st.subheader("Dropbox Cache")
+        st.subheader(
+            "Dropbox Cache"
+        )
 
         if st.button(
             "🔄 Clear Dropbox Cache",
@@ -554,16 +594,18 @@ def admin_ui():
             clear_dropbox_gallery_cache()
 
             st.success(
-                "Cache cleared."
+                "Dropbox cache cleared."
             )
 
     # --------------------------------------------------------
-    # TEST
+    # TEST GALLERY
     # --------------------------------------------------------
 
     st.markdown("---")
 
-    st.subheader("🧪 Test Gallery")
+    st.subheader(
+        "🧪 Test Gallery"
+    )
 
     if st.button(
         "Test Gallery",
@@ -599,52 +641,87 @@ def admin_ui():
 
                     listed = len(images)
 
-            if listed == 0:
+            st.write(
+                f"Images listed: {listed}"
+            )
+
+            st.write(
+                f"Images downloaded: {len(images)}"
+            )
+
+            st.write(
+                f"Download failures: {len(errors)}"
+            )
+
+            if listed > 0 and images:
+
+                st.success(
+                    "Gallery test completed successfully."
+                )
+
+            elif listed > 0 and not images:
 
                 st.warning(
-                    "Connection completed, but no images were listed."
+                    "Files were listed, but downloads failed."
                 )
 
             else:
 
-                st.success(
-                    f"Gallery test completed. "
-                    f"Images listed: {listed}. "
-                    f"Images downloaded: {len(images)}."
+                st.warning(
+                    "No images were found."
                 )
+
+            # ------------------------------------------------
+            # SAMPLE PHOTOS
+            # ------------------------------------------------
 
             if images:
 
-                st.subheader(
-                    "Sample gallery images"
+                st.markdown(
+                    "### Sample photos"
                 )
 
                 sample = images[:5]
 
-                cols = st.columns(
-                    min(3, len(sample))
+                columns = st.columns(
+                    min(
+                        3,
+                        len(sample),
+                    )
                 )
 
-                for index, image in enumerate(sample):
+                for index, item in enumerate(sample):
 
-                    with cols[
-                        index % len(cols)
+                    with columns[
+                        index % len(columns)
                     ]:
 
                         st.image(
-                            image["preview"],
-                            caption=image["name"],
+                            item["preview"],
+                            caption=item["name"],
                         )
+
+            # ------------------------------------------------
+            # DOWNLOAD ERRORS
+            # ------------------------------------------------
 
             if errors:
 
-                with st.expander(
-                    f"Download errors ({len(errors)})"
-                ):
+                st.markdown(
+                    "### Dropbox download errors"
+                )
 
-                    for error in errors:
+                for error in errors[:20]:
 
-                        st.write(error)
+                    st.error(
+                        error
+                    )
+
+                if len(errors) > 20:
+
+                    st.caption(
+                        f"{len(errors) - 20} additional errors omitted."
+                    )
 
         except Exception as exc:
 
